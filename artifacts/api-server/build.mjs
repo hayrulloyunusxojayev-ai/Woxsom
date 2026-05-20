@@ -100,6 +100,8 @@ async function buildAll() {
       "puppeteer",
       "puppeteer-core",
       "electron",
+      "./platform.node",
+      "grammy",
     ],
     sourcemap: "linked",
     plugins: [
