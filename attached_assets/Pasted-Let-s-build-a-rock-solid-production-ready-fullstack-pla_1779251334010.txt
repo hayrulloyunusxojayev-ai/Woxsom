@@ -1,0 +1,40 @@
+Let's build a rock-solid, production-ready fullstack platform for "Woxsom AI" (Telegram Bot Constructor with built-in AI Employees for micro-businesses in Uzbekistan) from absolute scratch. 
+
+To prevent compilation and bundling errors, we will implement this cleanly inside the main entry points using the pre-existing PostgreSQL database setup via Drizzle ORM.
+
+### 1. Database Schema
+Ensure the database has these 3 core tables:
+- `users`: id (UUID), telegram_id (BigInt, Unique), username, created_at
+- `stores`: id (UUID), owner_id (FK to users), bot_token (String, Unique), bot_username, store_name, context_data (Text for catalog), is_active (Boolean)
+- `orders`: id (UUID), store_id (FK to stores), customer_tg_id (BigInt), customer_name, customer_phone, customer_address, order_items (JSONB), total_price, status (PENDING), created_at
+
+### 2. Main Constructor Bot (100% Uzbek Interface)
+Use the `grammy` library. Connect it using `process.env.PLATFORM_BOT_TOKEN`.
+- On `/start`, register the user in the DB and display a permanent Uzbek Reply Keyboard:
+  1. "➕ Yangi do'kon yaratish"
+  2. "🏪 Mening do'konlarim"
+  3. "📦 Buyurtmalarni ko'rish"
+- **Create Store Wizard (Session-based):**
+  - Step 1: Ask "Do'koningiz nomini kiriting:"
+  - Step 2: Ask "Telegram Bot Tokenini yuboring:" -> Validate live using Telegram's `getMe`. If invalid, reply: "❌ Bot tokeni noto'g'ri. Qayta yuboring:"
+  - Step 3: Ask "Mahsulotlar katalogini va qoidalarini matn ko'rinishida yuboring:"
+  - Save to DB, then immediately trigger `bot.api.setWebhook` for this new store bot pointing to `https://${process.env.REPLIT_DEV_DOMAIN}/api/webhook/store/${bot_token}`.
+  - Reply with Uzbek success message and the link to their new bot.
+- **My Stores & View Orders:** Implement clean Uzbek listings from the database.
+
+### 3. AI Store Bot Layer (Autonomous AI Employee)
+- Create an Express route `POST /api/webhook/store/:bot_token` to catch messages sent to customer shops.
+- When a customer writes to a shop bot, use Replit's built-in OpenAI API proxy (using the workspace pre-configured client) to generate responses.
+- **System Prompt:** Instruct the AI that it is an elite Uzbek-speaking sales assistant for `[store_name]`. It must ONLY use the provided `context_data` (catalog and prices). It must naturally converse in Uzbek (or switch to Russian if the customer speaks Russian).
+- **Order Collection:** The AI must collect Name, Phone, and Address one by one from the customer. Once it has all three, it must append this structured block at the very end of its text reply:
+  `___CREATE_ORDER___ {"name": "...", "phone": "...", "address": "...", "items": "...", "total": 0}`
+- In the webhook code, if `___CREATE_ORDER___` is detected in the AI response:
+  1. Insert the order into the `orders` table.
+  2. Send a rich notification via the Main Platform Bot to the store owner in Uzbek: "🔔 YANGI BUYURTMA! Do'kon: ... Mijoz: ... Tel: ..."
+  3. Strip the JSON block from the text and send only the polite conversational reply back to the customer.
+
+### 4. Automatic Webhook Self-Registration
+- On server startup, immediately and programmatically call `setWebhook` for the Main Platform Bot pointing to `https://${process.env.REPLIT_DEV_DOMAIN}/api/webhook/platform`. 
+- Ensure all Telegram send operations are wrapped in safe try/catch blocks and text is sanitized to prevent Markdown/HTML rendering crashes.
+
+Please write the complete, clean code, push the schema, compile the TypeScript server, and make it live.
