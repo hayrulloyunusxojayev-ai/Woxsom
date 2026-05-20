@@ -13,6 +13,7 @@ export const ordersTable = pgTable("orders", {
   orderItems: jsonb("order_items").notNull(),
   totalPrice: numeric("total_price", { precision: 12, scale: 2 }).notNull().default("0"),
   status: text("status").notNull().default("PENDING"),
+  source: text("source").notNull().default("TELEGRAM"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
