@@ -10,13 +10,16 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: dashboard
+    description: Dashboard statistics and data
+  - name: chat
+    description: Live AI chat tester
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +27,69 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /dashboard/stats:
+    get:
+      operationId: getDashboardStats
+      tags: [dashboard]
+      summary: Get dashboard summary statistics
+      responses:
+        "200":
+          description: Dashboard stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+
+  /dashboard/stores:
+    get:
+      operationId: listStores
+      tags: [dashboard]
+      summary: List all stores with order counts
+      responses:
+        "200":
+          description: List of stores
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StoreWithStats"
+
+  /dashboard/orders:
+    get:
+      operationId: listOrders
+      tags: [dashboard]
+      summary: List recent orders across all stores
+      responses:
+        "200":
+          description: List of recent orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OrderSummary"
+
+  /chat/message:
+    post:
+      operationId: sendChatMessage
+      tags: [chat]
+      summary: Send a message to the AI chat tester (non-streaming)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatInput"
+      responses:
+        "200":
+          description: AI response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +100,115 @@ components:
       required:
         - status
 
+    DashboardStats:
+      type: object
+      properties:
+        activeStores:
+          type: integer
+          description: Number of active AI store managers
+        totalLeads:
+          type: integer
+          description: Total orders/leads captured across all stores
+        messagesToday:
+          type: integer
+          description: Orders received today
+        totalStores:
+          type: integer
+          description: Total stores created
+      required:
+        - activeStores
+        - totalLeads
+        - messagesToday
+        - totalStores
+
+    StoreWithStats:
+      type: object
+      properties:
+        id:
+          type: string
+        storeName:
+          type: string
+        botUsername:
+          type: string
+        isActive:
+          type: boolean
+        source:
+          type: string
+        orderCount:
+          type: integer
+        createdAt:
+          type: string
+      required:
+        - id
+        - storeName
+        - botUsername
+        - isActive
+        - orderCount
+        - createdAt
+
+    OrderSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        storeName:
+          type: string
+        customerName:
+          type: string
+        customerPhone:
+          type: string
+        customerAddress:
+          type: string
+        totalPrice:
+          type: string
+        status:
+          type: string
+        source:
+          type: string
+        createdAt:
+          type: string
+      required:
+        - id
+        - storeName
+        - customerName
+        - customerPhone
+        - totalPrice
+        - status
+        - source
+        - createdAt
+
+    ChatMessage:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+      required:
+        - role
+        - content
+
+    ChatInput:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        model:
+          type: string
+          default: "Qwen/Qwen2.5-72B-Instruct"
+      required:
+        - messages
+
+    ChatResponse:
+      type: object
+      properties:
+        content:
+          type: string
+        model:
+          type: string
+      required:
+        - content
+        - model
