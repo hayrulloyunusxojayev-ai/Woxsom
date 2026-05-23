@@ -5,8 +5,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Send, Bot, User } from "lucide-react";
-import { ChatMessage } from "@workspace/api-client-react/src/generated/api.schemas";
 import { useToast } from "@/hooks/use-toast";
+
+type ChatMessage = { role: "user" | "assistant" | "system"; content: string };
 
 export default function ChatTester() {
   const [messages, setMessages] = useState<ChatMessage[]>([
