@@ -1,5 +1,6 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import path from "node:path";
+import fs from "node:fs";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
@@ -7,7 +8,7 @@ import { logger } from "./lib/logger";
 
 const app: Express = express();
 
-// --- Логирование ---
+// --- Logging ---
 app.use(
   pinoHttp({
     logger,
@@ -33,30 +34,32 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-
-app.get("/", (_req, res) => {
-  res.json({ status: "Woxsom AI Server Backend Live" });
-});
-
-
+// --- API routes ---
 app.use("/api", router);
 
-// --- FRONTEND (Раздача статики из mockup-sandbox) ---
-// В твоей структуре: из artifacts/api-server/src нужно подняться на 3 уровня, 
-// чтобы попасть в корень, а затем войти в mockup-sandbox/dist
-const frontendPath = path.resolve(__dirname, "../../../mockup-sandbox/dist");
+// --- Frontend static files ---
+// In production (Render), the dashboard is built and served from here.
+// In dev (Replit), this path won't exist — the Vite dev server handles it separately.
+// __dirname in the built output = artifacts/api-server/dist/
+const frontendDist = path.resolve(__dirname, "../../dashboard/dist/public");
+const frontendExists = fs.existsSync(frontendDist);
 
-// Раздаём статические файлы (JS, CSS, картинки)
-app.use(express.static(frontendPath));
+if (frontendExists) {
+  app.use(express.static(frontendDist));
 
-// --- SPA fallback ---
-app.use((req: Request, res: Response, next: NextFunction) => {
-  // Пропускаем, если это не GET запрос или если это запрос к API
-  if (req.method !== "GET") return next();
-  if (req.path.startsWith("/api")) return next();
-
-  // Отдаем index.html для всех остальных маршрутов (чтобы работал React Router)
-  res.sendFile(path.join(frontendPath, "index.html"));
-});
+  // SPA fallback: all non-API GET routes serve index.html so React Router works
+  // Express 5 requires a named wildcard parameter (not bare *)
+  app.get("/{*splat}", (req: Request, res: Response, next: NextFunction) => {
+    if (req.path.startsWith("/api")) return next();
+    res.sendFile(path.join(frontendDist, "index.html"), (err) => {
+      if (err) next();
+    });
+  });
+} else {
+  // Dev-only health root so the API server isn't completely silent at /
+  app.get("/", (_req, res) => {
+    res.json({ status: "Woxsom AI API running (dev mode — frontend served separately)" });
+  });
+}
 
 export default app;
