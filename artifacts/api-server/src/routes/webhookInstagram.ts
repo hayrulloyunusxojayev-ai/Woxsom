@@ -178,13 +178,16 @@ router.post("/webhook/instagram", async (req: Request, res: Response) => {
 
       // Echo guard: ignore messages the page sent to itself
       if (messageObj?.is_echo) continue;
-      if (sender === (recipient ?? recipientId)) {
+      if (sender === recipientId || sender === recipient) {
         logger.info({ senderId: sender }, "Instagram: skipping own-page echo message");
         continue;
       }
 
-      const pageId = recipient ?? recipientId;
+      // entry.id is the Instagram Page ID in live events (primary source).
+      // Fall back to event.recipient.id only when entry.id is absent.
+      const pageId = recipientId || recipient || "";
 
+      console.log("[InstagramBot] Incoming event — pageId:", pageId, "| senderId:", sender, "| text:", userText);
       logger.info({ senderId: sender, pageId, textLength: userText.length }, "Instagram DM received");
 
       handleInstagramMessage(sender, pageId, userText).catch((err) => {
