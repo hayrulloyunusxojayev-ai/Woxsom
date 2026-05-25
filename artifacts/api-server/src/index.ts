@@ -5,7 +5,7 @@ import { createPlatformBot } from "./bot/platformBot";
 import { setPlatformBotHandler } from "./routes";
 import { db } from "@workspace/db";
 import { storesTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, isNotNull } from "drizzle-orm";
 import type { Request, Response } from "express";
 
 const rawPort = process.env["PORT"];
@@ -111,4 +111,61 @@ app.listen(port, async (err?: Error) => {
   }
 
   await bootstrapStoreWebhooks(serverUrl);
+  await subscribeInstagramPageWebhooks();
 });
+
+async function subscribeInstagramPageWebhooks(): Promise<void> {
+  const accessToken = process.env.INSTAGRAM_PAGE_ACCESS_TOKEN;
+  if (!accessToken) {
+    console.log("[Instagram] INSTAGRAM_PAGE_ACCESS_TOKEN not set — skipping page subscription");
+    return;
+  }
+
+  // Collect all unique Instagram Page IDs from active stores, plus any env-level default
+  const pageIds = new Set<string>();
+
+  try {
+    const stores = await db
+      .select({ instagramPageId: storesTable.instagramPageId, instagramToken: storesTable.instagramToken })
+      .from(storesTable)
+      .where(isNotNull(storesTable.instagramPageId));
+    for (const s of stores) {
+      if (s.instagramPageId) pageIds.add(s.instagramPageId);
+    }
+  } catch (err) {
+    console.error("[Instagram] Failed to query store page IDs:", err);
+  }
+
+  // Fallback: hardcoded env var page ID if no DB rows found
+  const envPageId = process.env.INSTAGRAM_PAGE_ID;
+  if (envPageId) pageIds.add(envPageId);
+
+  if (pageIds.size === 0) {
+    console.log("[Instagram] No Instagram Page IDs found — skipping subscription");
+    return;
+  }
+
+  const subscribedFields = "messages,messaging_postbacks,messaging_seen";
+
+  for (const pageId of pageIds) {
+    try {
+      const url = `https://graph.facebook.com/v25.0/${pageId}/subscribed_apps`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscribed_fields: subscribedFields, access_token: accessToken }),
+      });
+      const data = await res.json() as { success?: boolean; error?: { message: string } };
+      if (data.success) {
+        console.log(`[Instagram] ✅ Page ${pageId} subscribed to fields: ${subscribedFields}`);
+        logger.info({ pageId, subscribedFields }, "Instagram page subscription active");
+      } else {
+        console.error(`[Instagram] ❌ Page ${pageId} subscription failed:`, data.error?.message ?? JSON.stringify(data));
+        logger.error({ pageId, data }, "Instagram page subscription failed");
+      }
+    } catch (err) {
+      console.error(`[Instagram] ❌ Network error subscribing page ${pageId}:`, err);
+      logger.error({ err, pageId }, "Instagram page subscription network error");
+    }
+  }
+}
