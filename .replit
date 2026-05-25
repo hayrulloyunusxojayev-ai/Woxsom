@@ -39,3 +39,4 @@ externalPort = 3000
 
 [userenv.shared]
 AI_INTEGRATIONS_OPENAI_BASE_URL = "https://router.huggingface.co/v1"
+SERVER_URL = "https://woxsom.onrender.com"

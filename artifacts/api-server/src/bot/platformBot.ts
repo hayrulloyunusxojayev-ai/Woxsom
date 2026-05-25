@@ -19,6 +19,12 @@ function sanitize(text: string): string {
   );
 }
 
+function getServerUrl(): string | null {
+  if (process.env.SERVER_URL) return process.env.SERVER_URL.replace(/\/$/, "");
+  if (process.env.REPLIT_DEV_DOMAIN) return `https://${process.env.REPLIT_DEV_DOMAIN}`;
+  return null;
+}
+
 export function createPlatformBot(token: string) {
   const bot = new Bot<MyContext>(token);
 
@@ -190,7 +196,7 @@ export function createPlatformBot(token: string) {
         }
 
         const botUsername = data.result?.username ?? "unknown";
-        const domain = process.env.REPLIT_DEV_DOMAIN;
+        const serverUrl = getServerUrl();
 
         await db.insert(storesTable).values({
           ownerId: user.id,
@@ -201,12 +207,22 @@ export function createPlatformBot(token: string) {
           isActive: true,
         });
 
-        const webhookUrl = `https://${domain}/api/webhook/store/${savedToken}`;
-        await fetch(`https://api.telegram.org/bot${savedToken}/setWebhook`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: webhookUrl }),
-        });
+        if (serverUrl) {
+          const webhookUrl = `${serverUrl}/api/webhook/store/${savedToken}`;
+          const webhookRes = await fetch(`https://api.telegram.org/bot${savedToken}/setWebhook`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: webhookUrl, drop_pending_updates: true }),
+          });
+          const webhookData = (await webhookRes.json()) as { ok: boolean; description?: string };
+          if (webhookData.ok) {
+            logger.info({ storeName: savedName, webhookUrl }, "Store bot webhook registered");
+          } else {
+            logger.error({ storeName: savedName, webhookData }, "Store bot webhook registration failed");
+          }
+        } else {
+          logger.warn({ storeName: savedName }, "SERVER_URL not set — store bot webhook not registered");
+        }
 
         ctx.session.step = undefined;
         ctx.session.storeName = undefined;
