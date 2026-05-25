@@ -149,7 +149,7 @@ async function subscribeInstagramPageWebhooks(): Promise<void> {
     return;
   }
 
-  const subscribedFields = "messages,messaging_postbacks,messaging_seen";
+  const subscribedFields = "messages,messaging_postbacks";
 
   for (const [pageId, accessToken] of pages) {
     try {
