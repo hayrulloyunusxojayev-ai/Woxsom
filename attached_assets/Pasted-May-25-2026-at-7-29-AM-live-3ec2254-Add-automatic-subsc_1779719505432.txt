@@ -1,0 +1,47 @@
+May 25, 2026 at 7:29 AM
+live
+3ec2254
+Add automatic subscription to Instagram page webhooks on server startup Implements a new function `subscribeInstagramPageWebhooks` in `index.ts` that runs on server initialization. This function fetches Instagram Page IDs from the database and uses the `INSTAGRAM_PAGE_ACCESS_TOKEN` environment variable to POST a subscription request to the Meta Graph API, ensuring the application receives `messages`, `messaging_postbacks`, and `messaging_seen` events. It includes error handling and logging for success or failure. Replit-Commit-Author: Agent Replit-Commit-Session-Id: 093b07ee-926d-435d-838a-939451674ee7 Replit-Commit-Checkpoint-Type: full_checkpoint Replit-Commit-Event-Id: 91c00318-77d6-47c8-a668-52ddabe56281 Replit-Commit-Screenshot-Url: https://storage.googleapis.com/screenshot-production-us-central1/f6bc55a9-1408-475c-84f4-77f8edd857a6/093b07ee-926d-435d-838a-939451674ee7/i8JvZpG
+
+All logs
+Search
+Search
+
+May 25, 7:28 AM - 7:32 AM
+PDT
+
+
+
+==> Cloning from https://github.com/hayrulloyunusxojayev-ai/Woxsom
+==> Checking out commit 3ec2254b082a574d5ba67ce140acb5a795f8f347 in branch main
+==> Using Node.js version 24.14.1 (default)
+==> Docs on specifying a Node.js version: https://render.com/docs/node-version
+==> Running build command 'pnpm install --frozen-lockfile; pnpm run build'...
+> workspace@0.0.0 build /opt/render/project/src
+> pnpm run typecheck && pnpm -r --if-present run build
+> workspace@0.0.0 typecheck /opt/render/project/src
+> pnpm run typecheck:libs && pnpm -r --filter "./artifacts/**" --filter "./scripts" --if-present run typecheck
+> workspace@0.0.0 typecheck:libs /opt/render/project/src
+> tsc --build
+==> Uploading build...
+==> Uploaded in 3.2s. Compression took 8.9s
+==> Build successful 🎉
+==> Deploying...
+==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+==> Running 'cd artifacts/api-server && node --enable-source-maps ./dist/index.mjs'
+{"level":30,"time":1779719463488,"pid":70,"hostname":"srv-d86p54mk1jcs739gtpd0-hibernate-74647b4488-gzvkk","port":10000,"msg":"Server listening"}
+{"level":30,"time":1779719463889,"pid":70,"hostname":"srv-d86p54mk1jcs739gtpd0-hibernate-74647b4488-gzvkk","req":{"id":1,"method":"HEAD","url":"/"},"res":{"statusCode":200},"responseTime":4,"msg":"request completed"}
+{"level":30,"time":1779719464108,"pid":70,"hostname":"srv-d86p54mk1jcs739gtpd0-hibernate-74647b4488-gzvkk","webhookUrl":"https://woxsom.onrender.com/api/webhook/platform","msg":"Platform bot webhook registered"}
+{"level":30,"time":1779719464204,"pid":70,"hostname":"srv-d86p54mk1jcs739gtpd0-hibernate-74647b4488-gzvkk","count":1,"msg":"Bootstrapping store webhooks"}
+{"level":30,"time":1779719464214,"pid":70,"hostname":"srv-d86p54mk1jcs739gtpd0-hibernate-74647b4488-gzvkk","storeName":"Iphone Hay","webhookUrl":"https://woxsom.onrender.com/api/webhook/store/8793637884:AAGgozlp8gehdlesKTBfs5i14Ygkv_euXEM","msg":"Store webhook registered"}
+{"level":30,"time":1779719464214,"pid":70,"hostname":"srv-d86p54mk1jcs739gtpd0-hibernate-74647b4488-gzvkk","succeeded":1,"failed":0,"msg":"Store webhook bootstrap complete"}
+[Instagram] ❌ Page 17841449108804047 subscription failed: Invalid OAuth access token - Cannot parse access token
+{"level":50,"time":1779719464685,"pid":70,"hostname":"srv-d86p54mk1jcs739gtpd0-hibernate-74647b4488-gzvkk","pageId":"17841449108804047","data":{"error":{"message":"Invalid OAuth access token - Cannot parse access token","type":"OAuthException","code":190,"fbtrace_id":"AGWFM82JkhU6FH8TvwBMvX9"}},"msg":"Instagram page subscription failed"}
+==> Your service is live 🎉
+==> 
+==> ///////////////////////////////////////////////////////////
+==> 
+==> Available at your primary URL https://woxsom.onrender.com
+==> 
+==> ///////////////////////////////////////////////////////////
+Need better ways to work with logs? Try theRender CLI, Render MCP Server, or set up a log stream integration 

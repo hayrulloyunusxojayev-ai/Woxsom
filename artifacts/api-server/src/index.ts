@@ -115,14 +115,10 @@ app.listen(port, async (err?: Error) => {
 });
 
 async function subscribeInstagramPageWebhooks(): Promise<void> {
-  const accessToken = process.env.INSTAGRAM_PAGE_ACCESS_TOKEN;
-  if (!accessToken) {
-    console.log("[Instagram] INSTAGRAM_PAGE_ACCESS_TOKEN not set — skipping page subscription");
-    return;
-  }
+  const globalToken = process.env.INSTAGRAM_PAGE_ACCESS_TOKEN;
 
-  // Collect all unique Instagram Page IDs from active stores, plus any env-level default
-  const pageIds = new Set<string>();
+  // Map of pageId → access token (store-level token takes priority over global env var)
+  const pages = new Map<string, string>();
 
   try {
     const stores = await db
@@ -130,24 +126,32 @@ async function subscribeInstagramPageWebhooks(): Promise<void> {
       .from(storesTable)
       .where(isNotNull(storesTable.instagramPageId));
     for (const s of stores) {
-      if (s.instagramPageId) pageIds.add(s.instagramPageId);
+      if (!s.instagramPageId) continue;
+      const token = s.instagramToken ?? globalToken;
+      if (token) {
+        pages.set(s.instagramPageId, token);
+      } else {
+        console.log(`[Instagram] Page ${s.instagramPageId} skipped — no token available`);
+      }
     }
   } catch (err) {
     console.error("[Instagram] Failed to query store page IDs:", err);
   }
 
-  // Fallback: hardcoded env var page ID if no DB rows found
+  // Fallback: env var page ID + global token if nothing came from the DB
   const envPageId = process.env.INSTAGRAM_PAGE_ID;
-  if (envPageId) pageIds.add(envPageId);
+  if (envPageId && globalToken && !pages.has(envPageId)) {
+    pages.set(envPageId, globalToken);
+  }
 
-  if (pageIds.size === 0) {
-    console.log("[Instagram] No Instagram Page IDs found — skipping subscription");
+  if (pages.size === 0) {
+    console.log("[Instagram] No Instagram Page IDs with valid tokens found — skipping subscription");
     return;
   }
 
   const subscribedFields = "messages,messaging_postbacks,messaging_seen";
 
-  for (const pageId of pageIds) {
+  for (const [pageId, accessToken] of pages) {
     try {
       const url = `https://graph.facebook.com/v25.0/${pageId}/subscribed_apps`;
       const res = await fetch(url, {
