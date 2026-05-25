@@ -121,7 +121,7 @@ router.post("/webhook/store/:bot_token", async (req, res) => {
     const recentHistory = getHistory(bot_token, chatId).slice(-6);
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "Qwen/Qwen2.5-72B-Instruct",
       max_tokens: 256,
       messages: [
         { role: "system", content: buildSystemPrompt(store.storeName, store.contextData) },
