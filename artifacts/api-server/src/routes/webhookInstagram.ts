@@ -7,43 +7,38 @@ import { logger } from "../lib/logger";
 
 const router = Router();
 
+const MODEL = "Qwen/Qwen2.5-72B-Instruct";
 const ORDER_MARKER = "___CREATE_ORDER___";
 const GRAPH_API_URL = "https://graph.facebook.com/v25.0/me/messages";
 
-// Separate in-memory history for Instagram conversations
-// Key format: "instagram:{senderId}" — never collides with Telegram keys
+// In-memory conversation history — key: "instagram:{senderId}:{recipientId}"
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
 }
 const igHistory = new Map<string, ChatMessage[]>();
 
-function igKey(senderId: string): string {
-  return `instagram:${senderId}`;
+function igKey(senderId: string, recipientId: string): string {
+  return `instagram:${senderId}:${recipientId}`;
 }
 
-function getIgHistory(senderId: string): ChatMessage[] {
-  const key = igKey(senderId);
+function getIgHistory(senderId: string, recipientId: string): ChatMessage[] {
+  const key = igKey(senderId, recipientId);
   if (!igHistory.has(key)) igHistory.set(key, []);
   return igHistory.get(key)!;
 }
 
-function appendIgHistory(senderId: string, role: "user" | "assistant", content: string): void {
-  getIgHistory(senderId).push({ role, content });
+function appendIgHistory(senderId: string, recipientId: string, role: "user" | "assistant", content: string): void {
+  getIgHistory(senderId, recipientId).push({ role, content });
 }
 
-function clearIgHistory(senderId: string): void {
-  igHistory.delete(igKey(senderId));
+function clearIgHistory(senderId: string, recipientId: string): void {
+  igHistory.delete(igKey(senderId, recipientId));
 }
 
-async function sendInstagramMessage(recipientId: string, text: string): Promise<void> {
-  const token = process.env.INSTAGRAM_PAGE_ACCESS_TOKEN;
-  if (!token) {
-    logger.error("INSTAGRAM_PAGE_ACCESS_TOKEN is not set");
-    return;
-  }
+async function sendInstagramMessage(recipientId: string, text: string, accessToken: string): Promise<void> {
   try {
-    const res = await fetch(`${GRAPH_API_URL}?access_token=${token}`, {
+    const res = await fetch(`${GRAPH_API_URL}?access_token=${accessToken}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -51,9 +46,12 @@ async function sendInstagramMessage(recipientId: string, text: string): Promise<
         message: { text: text.slice(0, 2000) },
       }),
     });
+    const status = res.status;
     if (!res.ok) {
       const body = await res.text();
-      logger.warn({ recipientId, body }, "Instagram sendMessage failed");
+      logger.warn({ recipientId, status, body }, "Instagram sendMessage failed");
+    } else {
+      logger.info({ recipientId, status }, "Instagram sendMessage succeeded");
     }
   } catch (err) {
     logger.error({ err, recipientId }, "Instagram sendMessage network error");
@@ -122,17 +120,23 @@ function buildSystemPrompt(storeName: string, catalog: string): string {
   );
 }
 
-// Resolve which store to use for Instagram messages.
-// Priority: INSTAGRAM_STORE_BOT_TOKEN env var → first active store.
-async function resolveStore() {
-  const token = process.env.INSTAGRAM_STORE_BOT_TOKEN;
-  if (token) {
-    return db.query.storesTable.findFirst({ where: eq(storesTable.botToken, token) });
+// Resolve the store for an Instagram Page ID.
+// Priority: store with matching instagramPageId → INSTAGRAM_STORE_BOT_TOKEN env → first active store.
+async function resolveStore(recipientId: string) {
+  const byPageId = await db.query.storesTable.findFirst({
+    where: eq(storesTable.instagramPageId, recipientId),
+  });
+  if (byPageId) return byPageId;
+
+  const envToken = process.env.INSTAGRAM_STORE_BOT_TOKEN;
+  if (envToken) {
+    return db.query.storesTable.findFirst({ where: eq(storesTable.botToken, envToken) });
   }
+
   return db.query.storesTable.findFirst({ where: eq(storesTable.isActive, true) });
 }
 
-// GET /api/webhook/instagram — Meta verification challenge
+// GET /api/webhook/instagram — Meta verification handshake
 router.get("/webhook/instagram", (req: Request, res: Response) => {
   const mode = req.query["hub.mode"] as string | undefined;
   const token = req.query["hub.verify_token"] as string | undefined;
@@ -147,76 +151,92 @@ router.get("/webhook/instagram", (req: Request, res: Response) => {
   }
 });
 
-// POST /api/webhook/instagram — incoming DM events
+// POST /api/webhook/instagram — incoming DM events from Meta
 router.post("/webhook/instagram", async (req: Request, res: Response) => {
-  // Acknowledge immediately so Meta doesn't retry
-  res.sendStatus(200);
+  // Acknowledge immediately so Meta does not retry
+  res.status(200).send("OK");
 
   const body = req.body as Record<string, unknown>;
 
-  // Validate it's an Instagram messaging event
   if (body.object !== "instagram") return;
 
   const entries = body.entry as Array<Record<string, unknown>> | undefined;
   if (!entries?.length) return;
 
   for (const entry of entries) {
+    const recipientId = (entry.id as string | undefined) ?? "";
     const messaging = entry.messaging as Array<Record<string, unknown>> | undefined;
     if (!messaging?.length) continue;
 
     for (const event of messaging) {
       const sender = (event.sender as Record<string, unknown> | undefined)?.id as string | undefined;
+      const recipient = (event.recipient as Record<string, unknown> | undefined)?.id as string | undefined;
       const messageObj = event.message as Record<string, unknown> | undefined;
       const userText = (messageObj?.text as string | undefined)?.trim();
 
       if (!sender || !userText) continue;
-      // Ignore echo messages sent by the page itself
-      if (messageObj?.is_echo) continue;
 
-      // Fire-and-forget so we don't block the loop
-      handleInstagramMessage(sender, userText).catch((err) => {
+      // Echo guard: ignore messages the page sent to itself
+      if (messageObj?.is_echo) continue;
+      if (sender === (recipient ?? recipientId)) {
+        logger.info({ senderId: sender }, "Instagram: skipping own-page echo message");
+        continue;
+      }
+
+      const pageId = recipient ?? recipientId;
+
+      logger.info({ senderId: sender, pageId, textLength: userText.length }, "Instagram DM received");
+
+      handleInstagramMessage(sender, pageId, userText).catch((err) => {
         console.error("[InstagramBot] Unhandled error:", err);
       });
     }
   }
 });
 
-async function handleInstagramMessage(senderId: string, userText: string): Promise<void> {
+async function handleInstagramMessage(senderId: string, recipientPageId: string, userText: string): Promise<void> {
   try {
-    const store = await resolveStore();
+    const store = await resolveStore(recipientPageId);
     if (!store || !store.isActive) {
-      logger.warn({ senderId }, "No active store found for Instagram message");
+      logger.warn({ senderId, recipientPageId }, "No active store found for Instagram Page ID");
       return;
     }
 
-    appendIgHistory(senderId, "user", userText);
-    const recentHistory = getIgHistory(senderId).slice(-6);
+    // Use store-specific token if available, fall back to global env var
+    const accessToken = store.instagramToken ?? process.env.INSTAGRAM_PAGE_ACCESS_TOKEN ?? "";
+    if (!accessToken) {
+      logger.error({ storeId: store.id }, "No Instagram access token available — cannot reply");
+      return;
+    }
 
+    appendIgHistory(senderId, recipientPageId, "user", userText);
+    const recentHistory = getIgHistory(senderId, recipientPageId).slice(-6);
+
+    const llmStart = Date.now();
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: MODEL,
       max_tokens: 256,
       messages: [
         { role: "system", content: buildSystemPrompt(store.storeName, store.contextData) },
         ...recentHistory,
       ],
     });
+    const llmMs = Date.now() - llmStart;
 
     const aiText = (response.choices[0]?.message?.content ?? "").trim();
-    logger.info({ senderId, aiTextLength: aiText.length }, "Instagram AI response received");
+    logger.info({ senderId, aiTextLength: aiText.length, llmMs, model: MODEL }, "Instagram LLM response");
 
     if (!aiText) {
-      logger.warn({ senderId, response }, "Empty AI response for Instagram message");
-      await sendInstagramMessage(senderId, "Kechirasiz, qayta yuboring.");
+      logger.warn({ senderId }, "Empty LLM response for Instagram message");
+      await sendInstagramMessage(senderId, "Kechirasiz, qayta yuboring.", accessToken);
       return;
     }
 
     const { reply, order } = extractOrder(aiText);
 
     if (order) {
-      // 1. Convert Instagram PSID (numeric string) to BigInt for the DB field
       const senderBigInt = BigInt(senderId);
 
-      // 2. Commit order to DB with source='INSTAGRAM'
       await db.insert(ordersTable).values({
         storeId: store.id,
         customerTgId: senderBigInt,
@@ -230,10 +250,8 @@ async function handleInstagramMessage(senderId: string, userText: string): Promi
       });
       logger.info({ storeId: store.id, customer: order.name }, "Instagram order committed to DB");
 
-      // 3. Clear conversation history for this sender
-      clearIgHistory(senderId);
+      clearIgHistory(senderId, recipientPageId);
 
-      // 4. Notify store owner via Telegram platform bot
       const owner = await db.query.usersTable.findFirst({
         where: eq(usersTable.id, store.ownerId),
       });
@@ -253,18 +271,21 @@ async function handleInstagramMessage(senderId: string, userText: string): Promi
         }
       }
 
-      // 5. Reply to customer on Instagram (clean reply, no JSON block)
       const customerReply = reply || "✅ Buyurtmangiz qabul qilindi! Tez orada siz bilan bog'lanamiz. Rahmat! 🙏";
-      await sendInstagramMessage(senderId, customerReply);
-      appendIgHistory(senderId, "assistant", customerReply);
+      await sendInstagramMessage(senderId, customerReply, accessToken);
+      appendIgHistory(senderId, recipientPageId, "assistant", customerReply);
     } else {
-      appendIgHistory(senderId, "assistant", aiText);
-      await sendInstagramMessage(senderId, aiText);
+      appendIgHistory(senderId, recipientPageId, "assistant", aiText);
+      await sendInstagramMessage(senderId, aiText, accessToken);
     }
   } catch (err) {
     console.error("[InstagramBot] Error handling message:", err);
     logger.error({ err, senderId }, "Instagram message handler error");
-    await sendInstagramMessage(senderId, "Kechirasiz, hozir texnik muammo bor. Bir oz kutib qayta yozing.");
+    await sendInstagramMessage(
+      senderId,
+      "Kechirasiz, hozir texnik muammo bor. Bir oz kutib qayta yozing.",
+      process.env.INSTAGRAM_PAGE_ACCESS_TOKEN ?? ""
+    );
   }
 }
 

@@ -1,0 +1,17 @@
+We are expanding the Woxsom B2B platform to support Instagram Automation via the Meta Graph API. All environment variables (`INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_PAGE_ACCESS_TOKEN`, and `INSTAGRAM_VERIFY_TOKEN`) have already been set up in production on Render.
+
+Please implement the Instagram Webhook handler in our Express server.
+
+REQUIRED FIXES & IMPLEMENTATIONS:
+1. Create a new Express router endpoint at `/api/webhook/instagram`.
+2. Implement the GET method for Meta's webhook verification handshake. It must verify that `req.query['hub.verify_token']` exactly matches `process.env.INSTAGRAM_VERIFY_TOKEN` and return the `req.query['hub.challenge']` string with a 200 status.
+3. Implement the POST method to handle incoming webhook events from Meta (Instagram Direct messages).
+4. Inside the POST handler:
+   - Parse the incoming Meta JSON payload to extract the customer's Instagram ID (`sender.id`), the store's Instagram Page ID (`recipient.id`), and the message text.
+   - Implement an echo-loop guard: ignore the message if it originates from the bot's own Instagram Page ID to prevent infinite response loops.
+   - Use Drizzle ORM to query our PostgreSQL database. Check if we need to add an `instagramPageId` or `instagramToken` column to our existing stores/shops schema to map `recipient.id` to the correct store configuration and its prompt. If a schema modification is needed, update the Drizzle schema and generate the migration files.
+   - Pass the message text to our existing HuggingFace LLM helper, making sure to use the active, verified model: "Qwen/Qwen2.5-72B-Instruct".
+   - Reply to the customer's Instagram Direct by making an HTTP POST request to Meta's Graph API (`https://graph.facebook.com/v25.0/me/messages`). Authenticate the request using the appropriate Instagram page access token (fallback to `process.env.INSTAGRAM_PAGE_ACCESS_TOKEN` if a store-specific token is not yet in the DB row).
+5. Add clean logging using our logger for incoming Instagram events, LLM generation performance, and Meta API HTTP response statuses.
+
+Review the existing code in `apps/server/src/routes/` or where routes are defined, match the coding style, apply the changes cleanly, and prepare the repository for a GitHub push.

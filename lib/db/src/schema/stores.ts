@@ -11,6 +11,8 @@ export const storesTable = pgTable("stores", {
   storeName: text("store_name").notNull(),
   contextData: text("context_data").notNull(),
   isActive: boolean("is_active").notNull().default(true),
+  instagramPageId: text("instagram_page_id").unique(),
+  instagramToken: text("instagram_token"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
