@@ -149,7 +149,9 @@ async function subscribeInstagramPageWebhooks(): Promise<void> {
     return;
   }
 
-  const subscribedFields = "messages,messaging_postbacks";
+  // Subscribe to Instagram Business Account (instagramPageId = IG account ID, not FB Page ID).
+  // Only "messages" is needed — no pages_messaging permission required for Instagram DMs.
+  const subscribedFields = "messages";
 
   for (const [pageId, accessToken] of pages) {
     try {
