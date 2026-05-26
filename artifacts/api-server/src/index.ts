@@ -111,7 +111,8 @@ app.listen(port, async (err?: Error) => {
   }
 
   await bootstrapStoreWebhooks(serverUrl);
-  await subscribeInstagramPageWebhooks();
+  // Instagram page subscription is configured manually in the Meta Developer Dashboard.
+  // await subscribeInstagramPageWebhooks();
 });
 
 async function subscribeInstagramPageWebhooks(): Promise<void> {
