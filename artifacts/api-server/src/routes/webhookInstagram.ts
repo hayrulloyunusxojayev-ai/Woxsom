@@ -9,7 +9,7 @@ const router = Router();
 
 const MODEL = "Qwen/Qwen2.5-72B-Instruct";
 const ORDER_MARKER = "___CREATE_ORDER___";
-const GRAPH_API_URL = "https://graph.facebook.com/v25.0/me/messages";
+const GRAPH_API_BASE = "https://graph.facebook.com/v25.0";
 
 // In-memory conversation history — key: "instagram:{senderId}:{recipientId}"
 interface ChatMessage {
@@ -36,25 +36,37 @@ function clearIgHistory(senderId: string, recipientId: string): void {
   igHistory.delete(igKey(senderId, recipientId));
 }
 
-async function sendInstagramMessage(recipientId: string, text: string, accessToken: string): Promise<void> {
+async function sendInstagramMessage(
+  pageId: string,
+  recipientId: string,
+  text: string,
+  accessToken: string
+): Promise<void> {
+  // Must POST to /{ig-business-account-id}/messages — NOT /me/messages (that's legacy Messenger)
+  const url = `${GRAPH_API_BASE}/${pageId}/messages`;
+  const payload = {
+    recipient: { id: recipientId },
+    message: { text: text.slice(0, 2000) },
+  };
+  console.log(`[InstagramBot] Sending reply → POST ${url}`);
+  console.log(`[InstagramBot] Payload: recipient=${recipientId} text="${text.slice(0, 80)}..."`);
   try {
-    const res = await fetch(`${GRAPH_API_URL}?access_token=${accessToken}`, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        recipient: { id: recipientId },
-        message: { text: text.slice(0, 2000) },
-      }),
+      body: JSON.stringify({ ...payload, access_token: accessToken }),
     });
-    const status = res.status;
+    const responseBody = await res.text();
     if (!res.ok) {
-      const body = await res.text();
-      logger.warn({ recipientId, status, body }, "Instagram sendMessage failed");
+      console.error(`[InstagramBot] ❌ Send failed — HTTP ${res.status}: ${responseBody}`);
+      logger.warn({ recipientId, pageId, status: res.status, body: responseBody }, "Instagram sendMessage failed");
     } else {
-      logger.info({ recipientId, status }, "Instagram sendMessage succeeded");
+      console.log(`[InstagramBot] ✅ Reply sent — HTTP ${res.status}: ${responseBody}`);
+      logger.info({ recipientId, pageId, status: res.status }, "Instagram sendMessage succeeded");
     }
   } catch (err) {
-    logger.error({ err, recipientId }, "Instagram sendMessage network error");
+    console.error(`[InstagramBot] ❌ Network error sending to ${recipientId}:`, err);
+    logger.error({ err, recipientId, pageId }, "Instagram sendMessage network error");
   }
 }
 
@@ -229,9 +241,11 @@ async function handleInstagramMessage(senderId: string, recipientPageId: string,
     const aiText = (response.choices[0]?.message?.content ?? "").trim();
     logger.info({ senderId, aiTextLength: aiText.length, llmMs, model: MODEL }, "Instagram LLM response");
 
+    console.log(`[InstagramBot] LLM reply (${llmMs}ms): "${aiText.slice(0, 120)}"`);
+
     if (!aiText) {
       logger.warn({ senderId }, "Empty LLM response for Instagram message");
-      await sendInstagramMessage(senderId, "Kechirasiz, qayta yuboring.", accessToken);
+      await sendInstagramMessage(recipientPageId, senderId, "Kechirasiz, qayta yuboring.", accessToken);
       return;
     }
 
@@ -275,16 +289,17 @@ async function handleInstagramMessage(senderId: string, recipientPageId: string,
       }
 
       const customerReply = reply || "✅ Buyurtmangiz qabul qilindi! Tez orada siz bilan bog'lanamiz. Rahmat! 🙏";
-      await sendInstagramMessage(senderId, customerReply, accessToken);
+      await sendInstagramMessage(recipientPageId, senderId, customerReply, accessToken);
       appendIgHistory(senderId, recipientPageId, "assistant", customerReply);
     } else {
       appendIgHistory(senderId, recipientPageId, "assistant", aiText);
-      await sendInstagramMessage(senderId, aiText, accessToken);
+      await sendInstagramMessage(recipientPageId, senderId, aiText, accessToken);
     }
   } catch (err) {
     console.error("[InstagramBot] Error handling message:", err);
     logger.error({ err, senderId }, "Instagram message handler error");
     await sendInstagramMessage(
+      recipientPageId,
       senderId,
       "Kechirasiz, hozir texnik muammo bor. Bir oz kutib qayta yozing.",
       process.env.INSTAGRAM_PAGE_ACCESS_TOKEN ?? ""
