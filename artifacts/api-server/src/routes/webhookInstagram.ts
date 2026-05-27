@@ -165,52 +165,72 @@ router.get("/webhook/instagram", (req: Request, res: Response) => {
 
 // POST /api/webhook/instagram — incoming DM events from Meta
 router.post("/webhook/instagram", async (req: Request, res: Response) => {
-  // Acknowledge immediately so Meta does not retry
-  res.status(200).send("OK");
+  try {
+    console.log("=== INCOMING INSTAGRAM DATA ===");
+    console.log(JSON.stringify(req.body, null, 2));
 
-  console.log("[RAW INSTAGRAM WEBHOOK BODY]:", JSON.stringify(req.body, null, 2));
+    // Acknowledge immediately so Meta does not retry
+    res.sendStatus(200);
 
-  const body = req.body as Record<string, unknown>;
+    const body = req.body as Record<string, unknown>;
 
-  if (body.object !== "instagram") {
-    console.log("[InstagramBot] Skipping — object is not 'instagram', got:", body.object);
-    return;
-  }
+    if (body.object !== "instagram") {
+      console.log("[InstagramBot] Skipping — object is not 'instagram', got:", body.object);
+      return;
+    }
 
-  const entries = body.entry as Array<Record<string, unknown>> | undefined;
-  if (!entries?.length) return;
+    const entries = body.entry as Array<Record<string, unknown>> | undefined;
+    if (!entries?.length) {
+      console.log("[InstagramBot] No entries in payload");
+      return;
+    }
 
-  for (const entry of entries) {
-    const recipientId = (entry.id as string | undefined) ?? "";
-    const messaging = entry.messaging as Array<Record<string, unknown>> | undefined;
-    if (!messaging?.length) continue;
+    for (const entry of entries) {
+      const recipientId = (entry.id as string | undefined) ?? "";
+      const messaging = entry.messaging as Array<Record<string, unknown>> | undefined;
 
-    for (const event of messaging) {
-      const sender = (event.sender as Record<string, unknown> | undefined)?.id as string | undefined;
-      const recipient = (event.recipient as Record<string, unknown> | undefined)?.id as string | undefined;
-      const messageObj = event.message as Record<string, unknown> | undefined;
-      const userText = (messageObj?.text as string | undefined)?.trim();
-
-      if (!sender || !userText) continue;
-
-      // Echo guard: ignore messages the page sent to itself
-      if (messageObj?.is_echo) continue;
-      if (sender === recipientId || sender === recipient) {
-        logger.info({ senderId: sender }, "Instagram: skipping own-page echo message");
+      if (!messaging?.length) {
+        console.log("[InstagramBot] Entry has no messaging array — entry keys:", Object.keys(entry).join(", "));
         continue;
       }
 
-      // entry.id is the Instagram Page ID in live events (primary source).
-      // Fall back to event.recipient.id only when entry.id is absent.
-      const pageId = recipientId || recipient || "";
+      for (const event of messaging) {
+        const sender = (event.sender as Record<string, unknown> | undefined)?.id as string | undefined;
+        const recipient = (event.recipient as Record<string, unknown> | undefined)?.id as string | undefined;
+        const messageObj = event.message as Record<string, unknown> | undefined;
+        const userText = (messageObj?.text as string | undefined)?.trim();
 
-      console.log("[InstagramBot] Incoming event — pageId:", pageId, "| senderId:", sender, "| text:", userText);
-      logger.info({ senderId: sender, pageId, textLength: userText.length }, "Instagram DM received");
+        console.log("[InstagramBot] Event — sender:", sender, "| recipient:", recipient, "| entryId:", recipientId, "| text:", userText ?? "(none)");
 
-      handleInstagramMessage(sender, pageId, userText).catch((err) => {
-        console.error("[InstagramBot] Unhandled error:", err);
-      });
+        if (!sender || !userText) {
+          console.log("[InstagramBot] Skipping event — missing sender or text");
+          continue;
+        }
+
+        // Echo guard: ignore messages the page sent to itself
+        if (messageObj?.is_echo) {
+          console.log("[InstagramBot] Skipping echo message");
+          continue;
+        }
+        if (sender === recipientId || sender === recipient) {
+          console.log("[InstagramBot] Skipping own-page echo — sender matches page ID");
+          continue;
+        }
+
+        // entry.id is the Instagram Business Account ID in live events (primary source).
+        const pageId = recipientId || recipient || "";
+
+        console.log("[InstagramBot] Incoming DM — pageId:", pageId, "| senderId:", sender, "| text:", userText);
+        logger.info({ senderId: sender, pageId, textLength: userText.length }, "Instagram DM received");
+
+        handleInstagramMessage(sender, pageId, userText).catch((err) => {
+          console.error("[InstagramBot] Unhandled error in handleInstagramMessage:", err);
+        });
+      }
     }
+  } catch (error) {
+    console.error("Webhook crash avoided:", error);
+    if (!res.headersSent) res.sendStatus(200);
   }
 });
 
