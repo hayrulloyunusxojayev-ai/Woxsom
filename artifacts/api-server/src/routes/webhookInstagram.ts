@@ -168,9 +168,14 @@ router.post("/webhook/instagram", async (req: Request, res: Response) => {
   // Acknowledge immediately so Meta does not retry
   res.status(200).send("OK");
 
+  console.log("[RAW INSTAGRAM WEBHOOK BODY]:", JSON.stringify(req.body, null, 2));
+
   const body = req.body as Record<string, unknown>;
 
-  if (body.object !== "instagram") return;
+  if (body.object !== "instagram") {
+    console.log("[InstagramBot] Skipping — object is not 'instagram', got:", body.object);
+    return;
+  }
 
   const entries = body.entry as Array<Record<string, unknown>> | undefined;
   if (!entries?.length) return;
