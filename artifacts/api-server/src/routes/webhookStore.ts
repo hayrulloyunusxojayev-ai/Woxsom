@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { storesTable, ordersTable, usersTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { logger } from "../lib/logger";
 
@@ -13,15 +13,10 @@ const ORDER_MARKER = "___CREATE_ORDER___";
 // ---------------------------------------------------------------------------
 // Conversation history (in-memory)
 // ---------------------------------------------------------------------------
-interface ChatMessage {
-  role: "user" | "assistant";
-  content: string;
-}
+interface ChatMessage { role: "user" | "assistant"; content: string; }
 const conversationHistory = new Map<string, ChatMessage[]>();
 
-function historyKey(botToken: string, chatId: number): string {
-  return `${botToken}:${chatId}`;
-}
+function historyKey(botToken: string, chatId: number): string { return `${botToken}:${chatId}`; }
 function getHistory(botToken: string, chatId: number): ChatMessage[] {
   const key = historyKey(botToken, chatId);
   if (!conversationHistory.has(key)) conversationHistory.set(key, []);
@@ -51,18 +46,13 @@ async function sendMessage(
       text: text.slice(0, 4096),
       parse_mode: "HTML",
     };
-    if (keyboard) {
-      payload.reply_markup = { inline_keyboard: keyboard };
-    }
+    if (keyboard) payload.reply_markup = { inline_keyboard: keyboard };
     const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      const body = await res.text();
-      logger.warn({ chatId, body }, "Telegram sendMessage failed");
-    }
+    if (!res.ok) logger.warn({ chatId, body: await res.text() }, "Telegram sendMessage failed");
   } catch (err) {
     logger.error({ err, chatId }, "sendMessage network error");
   }
@@ -82,37 +72,32 @@ async function sendPhoto(
       caption: caption.slice(0, 1024),
       parse_mode: "HTML",
     };
-    if (keyboard) {
-      payload.reply_markup = { inline_keyboard: keyboard };
-    }
+    if (keyboard) payload.reply_markup = { inline_keyboard: keyboard };
     const res = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      const body = await res.text();
-      logger.warn({ chatId, body }, "Telegram sendPhoto failed");
-    }
+    if (!res.ok) logger.warn({ chatId, body: await res.text() }, "Telegram sendPhoto failed");
   } catch (err) {
     logger.error({ err, chatId }, "sendPhoto network error");
   }
 }
 
-async function answerCallbackQuery(botToken: string, callbackQueryId: string, text?: string): Promise<void> {
+async function answerCallbackQuery(botToken: string, id: string, text?: string): Promise<void> {
   try {
     await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+      body: JSON.stringify({ callback_query_id: id, text }),
     });
   } catch (err) {
-    logger.error({ err }, "answerCallbackQuery network error");
+    logger.error({ err }, "answerCallbackQuery error");
   }
 }
 
 // ---------------------------------------------------------------------------
-// Main navigation keyboard
+// Navigation keyboard
 // ---------------------------------------------------------------------------
 const MAIN_KEYBOARD: InlineKeyboard = [
   [
@@ -123,52 +108,81 @@ const MAIN_KEYBOARD: InlineKeyboard = [
 ];
 
 // ---------------------------------------------------------------------------
-// /start handler
+// Welcome screen
 // ---------------------------------------------------------------------------
-async function handleStart(botToken: string, chatId: number, firstName: string, store: typeof storesTable.$inferSelect): Promise<void> {
-  const welcome =
-    `👋 Assalomu alaykum, <b>${firstName}</b>!\n\n` +
-    `<b>${store.storeName}</b> do'koniga xush kelibsiz! 🎉\n\n` +
-    `Men sizning AI-maslahatchi robotingizman. Mahsulotlar haqida savol bering yoki quyidagi tugmalardan birini tanlang:`;
-
-  await sendMessage(botToken, chatId, welcome, MAIN_KEYBOARD);
+async function handleStart(
+  botToken: string,
+  chatId: number,
+  firstName: string,
+  store: typeof storesTable.$inferSelect
+): Promise<void> {
+  const text =
+    `👋 Salom, <b>${firstName}</b>!\n\n` +
+    `<b>${store.storeName}</b> do'koniga xush kelibsiz.\n` +
+    `Men sizning shaxsiy savdo maslahatchimanman — mahsulotlar haqida so'rang yoki quyidagi bo'limni tanlang:`;
+  await sendMessage(botToken, chatId, text, MAIN_KEYBOARD);
 }
 
 // ---------------------------------------------------------------------------
-// Catalog handler — formats contextData as a product card
+// Catalog — formatted product list, no raw dump
 // ---------------------------------------------------------------------------
-async function handleCatalog(botToken: string, chatId: number, store: typeof storesTable.$inferSelect): Promise<void> {
-  const catalogText =
-    `🛍 <b>${store.storeName} — Katalog</b>\n\n` +
-    `${store.contextData}\n\n` +
-    `💬 Biror mahsulot haqida batafsil ma'lumot olish uchun yozing yoki pastdagi tugmani bosing:`;
+async function handleCatalog(
+  botToken: string,
+  chatId: number,
+  store: typeof storesTable.$inferSelect
+): Promise<void> {
+  const lines = store.contextData
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const products = lines
+    .map((l) => {
+      const parts = l.split("|").map((p) => p.trim());
+      if (parts.length < 2) return null;
+      return { name: parts[0], price: parts[1] };
+    })
+    .filter(Boolean) as { name: string; price: string }[];
+
+  if (products.length === 0) {
+    await sendMessage(botToken, chatId, "Katalog hozir mavjud emas. Keyinroq kiring.", MAIN_KEYBOARD);
+    return;
+  }
+
+  const productLines = products.map((p, i) => `${i + 1}. <b>${p.name}</b> — ${p.price}`).join("\n");
+  const text =
+    `🛍 <b>${store.storeName} — Mahsulotlar</b>\n\n` +
+    `${productLines}\n\n` +
+    `💬 Biror mahsulot haqida batafsil ma'lumot olish uchun nomini yozing.`;
 
   const keyboard: InlineKeyboard = [
-    [{ text: "💬 AI bilan suhbat boshlash", callback_data: "menu:chat" }],
+    [{ text: "💬 Savol berish", callback_data: "menu:chat" }],
     [{ text: "🔙 Orqaga", callback_data: "menu:start" }],
   ];
-
-  await sendMessage(botToken, chatId, catalogText, keyboard);
+  await sendMessage(botToken, chatId, text, keyboard);
 }
 
 // ---------------------------------------------------------------------------
-// My Orders handler — queries real orders from DB
+// My Orders
 // ---------------------------------------------------------------------------
-async function handleMyOrders(botToken: string, chatId: number, fromId: number): Promise<void> {
+async function handleMyOrders(
+  botToken: string,
+  chatId: number,
+  fromId: number
+): Promise<void> {
   const orders = await db.query.ordersTable.findMany({
     where: eq(ordersTable.customerTgId, BigInt(fromId)),
     orderBy: (t, { desc }) => [desc(t.createdAt)],
     limit: 5,
   });
 
-  const keyboard: InlineKeyboard = [[{ text: "🔙 Orqaga", callback_data: "menu:start" }]];
+  const backKeyboard: InlineKeyboard = [[{ text: "🔙 Orqaga", callback_data: "menu:start" }]];
 
   if (!orders.length) {
     await sendMessage(
-      botToken,
-      chatId,
-      "📦 Sizda hali buyurtmalar yo'q.\n\nBiror mahsulot haqida so'rash uchun <b>AI Maslahatchi</b>ga murojaat qiling!",
-      keyboard
+      botToken, chatId,
+      "📦 Sizda hali buyurtmalar yo'q.\n\nBiror mahsulot haqida so'rash uchun AI Maslahatchi bilan bog'laning!",
+      backKeyboard
     );
     return;
   }
@@ -182,37 +196,33 @@ async function handleMyOrders(botToken: string, chatId: number, fromId: number):
   };
 
   const lines = orders.map((o, i) => {
+    const items = o.orderItems && typeof o.orderItems === "object" && "items" in o.orderItems
+      ? String((o.orderItems as Record<string, unknown>).items)
+      : "Mahsulot";
     const status = statusEmoji[o.status] ?? o.status;
     const date = new Date(o.createdAt).toLocaleDateString("uz-UZ");
-    return `${i + 1}. <b>${o.orderItems && typeof o.orderItems === "object" && "items" in o.orderItems ? String((o.orderItems as Record<string,unknown>).items) : "Mahsulot"}</b>\n   💰 ${o.totalPrice} so'm  |  ${status}  |  📅 ${date}`;
+    return `${i + 1}. <b>${items}</b>\n   💰 ${o.totalPrice} so'm  |  ${status}  |  📅 ${date}`;
   });
 
-  const text = `📦 <b>Oxirgi buyurtmalaringiz:</b>\n\n${lines.join("\n\n")}`;
-  await sendMessage(botToken, chatId, text, keyboard);
+  await sendMessage(
+    botToken, chatId,
+    `📦 <b>Oxirgi buyurtmalaringiz:</b>\n\n${lines.join("\n\n")}`,
+    backKeyboard
+  );
 }
 
 // ---------------------------------------------------------------------------
-// Order extraction helpers
+// Order extraction
 // ---------------------------------------------------------------------------
-interface OrderData {
-  name: string;
-  phone: string;
-  address: string;
-  items: string;
-  total: number;
-}
+interface OrderData { name: string; phone: string; address: string; items: string; total: number; }
 
 function extractOrder(aiText: string): { reply: string; order: OrderData | null } {
   const idx = aiText.indexOf(ORDER_MARKER);
   if (idx === -1) return { reply: aiText.trim(), order: null };
-
   const reply = aiText.slice(0, idx).trim();
   const after = aiText.slice(idx + ORDER_MARKER.length).trim();
   const match = after.match(/\{[\s\S]*?\}/);
-  if (!match) {
-    logger.warn({ after }, "ORDER_MARKER found but no JSON");
-    return { reply, order: null };
-  }
+  if (!match) { logger.warn({ after }, "ORDER_MARKER found but no JSON"); return { reply, order: null }; }
   try {
     const order = JSON.parse(match[0]) as OrderData;
     if (!order.name || !order.phone || !order.address) {
@@ -226,22 +236,28 @@ function extractOrder(aiText: string): { reply: string; order: OrderData | null 
   }
 }
 
+// ---------------------------------------------------------------------------
+// System prompt — Premium Sales Consultant
+// ---------------------------------------------------------------------------
 function buildSystemPrompt(storeName: string, catalog: string): string {
   return (
-    `Siz "${storeName}" do'koni uchun xushmuomala AI-sotuvchisiz. ` +
-    `Faqat quyidagi katalog bo'yicha javob bering:\n${catalog}\n\n` +
-    `Qoidalar:\n` +
-    `- Javoblar qisqa va aniq bo'lsin (2-3 jumla max).\n` +
-    `- Faqat bir marta salomlashing. Keyingi xabarlarda salomlashmang.\n` +
-    `- Mijoz rus tilida yozsa — rus tilida javob bering.\n` +
-    `- Mijoz sotib olishga tayyor bo'lsa, ketma-ket so'rang: Ismi → Telefoni → Manzili.\n` +
-    `- Barcha uch ma'lumot olingach, darhol javob oxirida quyidagini yozing (boshqa hech narsa qo'shmang):\n` +
+    `Siz "${storeName}" do'konining premium savdo maslahatchidasiz. ` +
+    `Muloqotingiz qisqa, aniq va xushmuomala bo'lsin.\n\n` +
+    `MAHSULOTLAR (bu sizning bilim bazangiz — mijozga to'liq ro'yxatni yubormang):\n${catalog}\n\n` +
+    `QOIDALAR:\n` +
+    `1. Birinchi xabarda bir marta salomlashing. Keyingi xabarlarda salomlashmang.\n` +
+    `2. Mahsulot haqida so'ralganda FAQAT: Nomi, Narxi, 1-2 ta asosiy xususiyat — 2-3 jumla yozing.\n` +
+    `3. Har bir mahsulot tavsifidan keyin darhol so'rang: "Buyurtma bermoqchimisiz?"\n` +
+    `4. Katalogda yo'q mahsulot so'ralganda: "Hozircha ${storeName}da bu mahsulot yo'q, lekin sizga [o'xshash mahsulot] tavsiya qilaman. Qiziqasizmi?"\n` +
+    `5. Mijoz rus tilida yozsa — rus tilida javob bering.\n` +
+    `6. Mijoz sotib olishga tayyor bo'lsa, ketma-ket so'rang: Ismi → Telefon raqami → Yetkazib berish manzili.\n` +
+    `7. Uch ma'lumot to'liq olingach, javob oxirida AYNAN quyidagini yozing (boshqa hech narsa qo'shmang):\n` +
     `${ORDER_MARKER} {"name": "...", "phone": "...", "address": "...", "items": "...", "total": 0}`
   );
 }
 
 // ---------------------------------------------------------------------------
-// AI chat handler (existing logic, unchanged)
+// AI message handler
 // ---------------------------------------------------------------------------
 async function handleAiMessage(
   botToken: string,
@@ -251,11 +267,11 @@ async function handleAiMessage(
   store: typeof storesTable.$inferSelect
 ): Promise<void> {
   appendHistory(botToken, chatId, "user", userText);
-  const recentHistory = getHistory(botToken, chatId).slice(-6);
+  const recentHistory = getHistory(botToken, chatId).slice(-8);
 
   const response = await openai.chat.completions.create({
     model: MODEL,
-    max_tokens: 256,
+    max_tokens: 300,
     messages: [
       { role: "system", content: buildSystemPrompt(store.storeName, store.contextData) },
       ...recentHistory,
@@ -266,7 +282,6 @@ async function handleAiMessage(
   logger.info({ chatId, aiTextLength: aiText.length }, "AI response received");
 
   if (!aiText) {
-    logger.warn({ chatId }, "Empty AI response");
     await sendMessage(botToken, chatId, "Kechirasiz, qayta yuboring.");
     return;
   }
@@ -285,7 +300,6 @@ async function handleAiMessage(
       status: "PENDING",
     });
     logger.info({ storeId: store.id, customer: order.name }, "Order committed to DB");
-
     clearHistory(botToken, chatId);
 
     const owner = await db.query.usersTable.findFirst({ where: eq(usersTable.id, store.ownerId) });
@@ -293,23 +307,22 @@ async function handleAiMessage(
       const platformToken = process.env.PLATFORM_BOT_TOKEN;
       if (platformToken) {
         const notification =
-          `🔔 YANGI BUYURTMA!\n\n` +
+          `🔔 <b>YANGI BUYURTMA!</b>\n\n` +
           `🏪 Do'kon: ${store.storeName}\n` +
           `👤 Mijoz: ${order.name}\n` +
           `📞 Tel: ${order.phone}\n` +
           `📍 Manzil: ${order.address}\n` +
-          `🛒 Mahsulotlar: ${order.items}\n` +
+          `🛒 Mahsulot: ${order.items}\n` +
           `💰 Summa: ${order.total} so'm`;
         await sendMessage(platformToken, Number(owner.telegramId), notification);
       }
     }
 
     const customerReply = reply || "✅ Buyurtmangiz qabul qilindi! Tez orada siz bilan bog'lanamiz. Rahmat! 🙏";
-    const postOrderKeyboard: InlineKeyboard = [
+    await sendMessage(botToken, chatId, customerReply, [
       [{ text: "📦 Buyurtmalarimni ko'rish", callback_data: "menu:orders" }],
       [{ text: "🏠 Bosh menyu", callback_data: "menu:start" }],
-    ];
-    await sendMessage(botToken, chatId, customerReply, postOrderKeyboard);
+    ]);
     appendHistory(botToken, chatId, "assistant", customerReply);
   } else {
     appendHistory(botToken, chatId, "assistant", aiText);
@@ -327,13 +340,12 @@ router.post("/webhook/store/:bot_token", async (req, res) => {
   const body = req.body as Record<string, unknown>;
 
   try {
-    // ── Resolve store ───────────────────────────────────────────────────────
     const store = await db.query.storesTable.findFirst({
       where: eq(storesTable.botToken, bot_token),
     });
     if (!store || !store.isActive) return;
 
-    // ── Callback query (inline button press) ───────────────────────────────
+    // ── Callback query (inline button press) ──────────────────────────────
     const callbackQuery = body.callback_query as Record<string, unknown> | undefined;
     if (callbackQuery) {
       const cbId = callbackQuery.id as string;
@@ -342,14 +354,13 @@ router.post("/webhook/store/:bot_token", async (req, res) => {
       const cbFrom = callbackQuery.from as Record<string, unknown> | undefined;
       const chatId = cbChat?.id as number | undefined;
       const fromId = cbFrom?.id as number | undefined;
-
       if (!chatId || !data) return;
 
       await answerCallbackQuery(bot_token, cbId);
 
       switch (data) {
         case "menu:start":
-          await handleStart(bot_token, chatId, String(cbFrom?.first_name ?? "Foydalanuvchi"), store);
+          await handleStart(bot_token, chatId, String(cbFrom?.first_name ?? ""), store);
           break;
         case "menu:catalog":
           await handleCatalog(bot_token, chatId, store);
@@ -359,9 +370,8 @@ router.post("/webhook/store/:bot_token", async (req, res) => {
           break;
         case "menu:chat":
           await sendMessage(
-            bot_token,
-            chatId,
-            "💬 Menga mahsulot haqida istalgan savolingizni yuboring — men javob beraman!",
+            bot_token, chatId,
+            "💬 Qaysi mahsulot haqida ma'lumot olmoqchisiz?\n\nSavol yuboring — men javob beraman!",
             [[{ text: "🔙 Orqaga", callback_data: "menu:start" }]]
           );
           break;
@@ -371,42 +381,30 @@ router.post("/webhook/store/:bot_token", async (req, res) => {
       return;
     }
 
-    // ── Regular message ─────────────────────────────────────────────────────
+    // ── Regular message ────────────────────────────────────────────────────
     const message = (body.message ?? body.edited_message) as Record<string, unknown> | undefined;
     if (!message) return;
 
     const chatId = ((message.chat as Record<string, unknown>)?.id as number) ?? 0;
     const userText = ((message.text as string | undefined) ?? "").trim();
     const fromId = ((message.from as Record<string, unknown>)?.id as number) ?? 0;
-    const firstName = String((message.from as Record<string, unknown>)?.first_name ?? "Foydalanuvchi");
+    const firstName = String((message.from as Record<string, unknown>)?.first_name ?? "");
 
     if (!chatId || !userText) return;
 
-    // /start command
-    if (userText === "/start") {
+    if (userText === "/start" || userText.toLowerCase() === "salom" || userText.toLowerCase() === "привет") {
       await handleStart(bot_token, chatId, firstName, store);
       return;
     }
+    if (userText === "/catalog") { await handleCatalog(bot_token, chatId, store); return; }
+    if (userText === "/orders") { await handleMyOrders(bot_token, chatId, fromId); return; }
 
-    // /catalog command
-    if (userText === "/catalog") {
-      await handleCatalog(bot_token, chatId, store);
-      return;
-    }
-
-    // /orders command
-    if (userText === "/orders") {
-      await handleMyOrders(bot_token, chatId, fromId);
-      return;
-    }
-
-    // All other text → AI
+    // Everything else → AI
     await handleAiMessage(bot_token, chatId, fromId, userText, store);
 
   } catch (err) {
-    console.error("[StoreBot] FATAL error in webhook handler:", err);
+    console.error("[StoreBot] FATAL error:", err);
     logger.error({ err }, "Store webhook handler error");
-
     const message = (body.message ?? body.edited_message) as Record<string, unknown> | undefined;
     const chatId = ((message?.chat as Record<string, unknown>)?.id as number) ?? 0;
     if (chatId) {

@@ -25,11 +25,46 @@ function getServerUrl(): string | null {
   return null;
 }
 
+// Parse structured catalog: "Name | Price | Description" (one per line)
+function parseCatalog(raw: string): { isValid: boolean; formatted: string; preview: string } {
+  const lines = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const products: { name: string; price: string; desc: string }[] = [];
+  const errors: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const parts = lines[i].split("|").map((p) => p.trim());
+    if (parts.length < 3) {
+      errors.push(`${i + 1}-qator noto'g'ri formatda: "${lines[i]}"`);
+      continue;
+    }
+    products.push({ name: parts[0], price: parts[1], desc: parts.slice(2).join("|").trim() });
+  }
+
+  if (errors.length > 0) {
+    return { isValid: false, formatted: raw, preview: errors.join("\n") };
+  }
+
+  const formatted = products
+    .map((p) => `${p.name} | ${p.price} | ${p.desc}`)
+    .join("\n");
+
+  const preview = products
+    .map((p, i) => `${i + 1}. <b>${sanitize(p.name)}</b> — ${sanitize(p.price)}\n   ${sanitize(p.desc)}`)
+    .join("\n\n");
+
+  return { isValid: true, formatted, preview };
+}
+
 export function createPlatformBot(token: string) {
   const bot = new Bot<MyContext>(token);
 
   bot.use(session({ initial: (): SessionData => ({}) }));
 
+  // ── Keyboards ─────────────────────────────────────────────────────────────
   const mainKeyboard = {
     keyboard: [
       [{ text: "➕ Yangi do'kon yaratish" }],
@@ -40,18 +75,24 @@ export function createPlatformBot(token: string) {
     persistent: true,
   };
 
+  const cancelKeyboard = {
+    keyboard: [[{ text: "❌ Bekor qilish" }]],
+    resize_keyboard: true,
+  };
+
+  // ── /start ────────────────────────────────────────────────────────────────
   bot.command("start", async (ctx) => {
     try {
       const tgId = BigInt(ctx.from!.id);
       const username = ctx.from?.username ?? null;
-      await db
-        .insert(usersTable)
-        .values({ telegramId: tgId, username })
-        .onConflictDoNothing();
+      await db.insert(usersTable).values({ telegramId: tgId, username }).onConflictDoNothing();
 
+      ctx.session.step = undefined;
       await ctx.reply(
-        "Assalomu alaykum! Woxsom AI platformasiga xush kelibsiz! 🤖\n\nQuyidagi menyudan birini tanlang:",
-        { reply_markup: mainKeyboard }
+        `👋 Xush kelibsiz, <b>${sanitize(ctx.from?.first_name ?? "")}</b>!\n\n` +
+        `Bu <b>Woxsom AI</b> — sizning AI-savdo assistantingiz. 🤖\n\n` +
+        `Quyidagi bo'limlardan birini tanlang:`,
+        { parse_mode: "HTML", reply_markup: mainKeyboard }
       );
     } catch (err) {
       logger.error({ err }, "Error in /start");
@@ -59,17 +100,32 @@ export function createPlatformBot(token: string) {
     }
   });
 
+  // ── Cancel from any wizard step ───────────────────────────────────────────
+  bot.hears("❌ Bekor qilish", async (ctx) => {
+    ctx.session.step = undefined;
+    ctx.session.storeName = undefined;
+    ctx.session.botToken = undefined;
+    await ctx.reply("❌ Amal bekor qilindi.", { reply_markup: mainKeyboard });
+  });
+
+  // ── Create store wizard ───────────────────────────────────────────────────
   bot.hears("➕ Yangi do'kon yaratish", async (ctx) => {
     try {
       ctx.session.step = "awaiting_name";
       ctx.session.storeName = undefined;
       ctx.session.botToken = undefined;
-      await ctx.reply("Do'koningiz nomini kiriting:", { reply_markup: { remove_keyboard: true } });
+      await ctx.reply(
+        `🏪 <b>Yangi do'kon yaratish</b>\n\n` +
+        `<b>1-qadam / 3:</b> Do'koningiz nomini kiriting.\n\n` +
+        `<i>Masalan: iPhone Hay, Kameliya Boutique</i>`,
+        { parse_mode: "HTML", reply_markup: cancelKeyboard }
+      );
     } catch (err) {
       logger.error({ err }, "Error starting store wizard");
     }
   });
 
+  // ── My stores ─────────────────────────────────────────────────────────────
   bot.hears("🏪 Mening do'konlarim", async (ctx) => {
     try {
       const tgId = BigInt(ctx.from!.id);
@@ -80,21 +136,24 @@ export function createPlatformBot(token: string) {
       }
       const stores = await db.query.storesTable.findMany({ where: eq(storesTable.ownerId, user.id) });
       if (stores.length === 0) {
-        await ctx.reply("Sizda hali do'kon yo'q. Yangi do'kon yarating!", { reply_markup: mainKeyboard });
+        await ctx.reply("Sizda hali do'kon yo'q.\nYangi do'kon yarating!", { reply_markup: mainKeyboard });
         return;
       }
-      let message = "🏪 Sizning do'konlaringiz:\n\n";
-      stores.forEach((s, i) => {
+      const lines = stores.map((s, i) => {
         const status = s.isActive ? "✅ Faol" : "❌ Nofaol";
-        message += `${i + 1}. ${sanitize(s.storeName)}\n   Bot: @${sanitize(s.botUsername)}\n   Holat: ${status}\n\n`;
+        return `${i + 1}. <b>${sanitize(s.storeName)}</b>\n   🤖 @${sanitize(s.botUsername)}   ${status}`;
       });
-      await ctx.reply(message, { reply_markup: mainKeyboard });
+      await ctx.reply(
+        `🏪 <b>Sizning do'konlaringiz:</b>\n\n${lines.join("\n\n")}`,
+        { parse_mode: "HTML", reply_markup: mainKeyboard }
+      );
     } catch (err) {
       logger.error({ err }, "Error listing stores");
       await ctx.reply("Xatolik yuz berdi.", { reply_markup: mainKeyboard });
     }
   });
 
+  // ── View orders ───────────────────────────────────────────────────────────
   bot.hears("📦 Buyurtmalarni ko'rish", async (ctx) => {
     try {
       const tgId = BigInt(ctx.from!.id);
@@ -108,73 +167,117 @@ export function createPlatformBot(token: string) {
         await ctx.reply("Sizda hali do'kon yo'q.", { reply_markup: mainKeyboard });
         return;
       }
-      const storeIds = stores.map((s) => s.id);
+
       let allOrders: Awaited<ReturnType<typeof db.query.ordersTable.findMany>> = [];
-      for (const storeId of storeIds) {
-        const storeOrders = await db.query.ordersTable.findMany({
-          where: eq(ordersTable.storeId, storeId),
-        });
-        allOrders = allOrders.concat(storeOrders);
+      for (const s of stores) {
+        const rows = await db.query.ordersTable.findMany({ where: eq(ordersTable.storeId, s.id) });
+        allOrders = allOrders.concat(rows);
       }
+
       if (allOrders.length === 0) {
         await ctx.reply("Hali buyurtma yo'q.", { reply_markup: mainKeyboard });
         return;
       }
+
       allOrders.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       const recent = allOrders.slice(0, 10);
-      let message = "📦 So'nggi buyurtmalar:\n\n";
-      for (const order of recent) {
-        const store = stores.find((s) => s.id === order.storeId);
-        message +=
-          `🔹 Do'kon: ${sanitize(store?.storeName ?? "?")}\n` +
-          `   Mijoz: ${sanitize(order.customerName)}\n` +
-          `   Tel: ${sanitize(order.customerPhone)}\n` +
-          `   Manzil: ${sanitize(order.customerAddress)}\n` +
-          `   Summa: ${order.totalPrice} so'm\n` +
-          `   Holat: ${order.status}\n` +
-          `   Sana: ${order.createdAt.toLocaleDateString("uz-UZ")}\n\n`;
-      }
-      await ctx.reply(message, { reply_markup: mainKeyboard });
+
+      const statusEmoji: Record<string, string> = {
+        PENDING: "🕐", PAID: "✅", SHIPPED: "🚚", DELIVERED: "📬", CANCELLED: "❌",
+      };
+
+      const lines = recent.map((o) => {
+        const store = stores.find((s) => s.id === o.storeId);
+        const emoji = statusEmoji[o.status] ?? "📋";
+        return (
+          `${emoji} <b>${sanitize(o.customerName)}</b> — ${o.totalPrice} so'm\n` +
+          `   🏪 ${sanitize(store?.storeName ?? "?")}  |  📅 ${o.createdAt.toLocaleDateString("uz-UZ")}\n` +
+          `   📞 ${sanitize(o.customerPhone)}  |  📍 ${sanitize(o.customerAddress)}`
+        );
+      });
+
+      await ctx.reply(
+        `📦 <b>So'nggi ${recent.length} ta buyurtma:</b>\n\n${lines.join("\n\n")}`,
+        { parse_mode: "HTML", reply_markup: mainKeyboard }
+      );
     } catch (err) {
       logger.error({ err }, "Error viewing orders");
       await ctx.reply("Xatolik yuz berdi.", { reply_markup: mainKeyboard });
     }
   });
 
+  // ── Wizard step handler ───────────────────────────────────────────────────
   bot.on("message:text", async (ctx) => {
     const step = ctx.session.step;
-    const text = ctx.message.text;
+    const text = ctx.message.text.trim();
 
     if (!step) return;
 
+    // ── Step 1: Store name ─────────────────────────────────────────────────
     if (step === "awaiting_name") {
-      ctx.session.storeName = text.trim();
+      if (text.length < 2 || text.length > 60) {
+        await ctx.reply("⚠️ Do'kon nomi 2–60 belgi orasida bo'lishi kerak. Qayta kiriting:");
+        return;
+      }
+      ctx.session.storeName = text;
       ctx.session.step = "awaiting_token";
-      await ctx.reply("Telegram Bot Tokenini yuboring:");
+      await ctx.reply(
+        `✅ Do'kon nomi: <b>${sanitize(text)}</b>\n\n` +
+        `<b>2-qadam / 3:</b> Telegram Bot Tokenini yuboring.\n\n` +
+        `💡 Token olish uchun: @BotFather → /newbot → tokenni nusxalab yuboring.\n` +
+        `<i>Misol: 123456789:AAFabc...</i>`,
+        { parse_mode: "HTML", reply_markup: cancelKeyboard }
+      );
       return;
     }
 
+    // ── Step 2: Bot token ──────────────────────────────────────────────────
     if (step === "awaiting_token") {
-      const tokenInput = text.trim();
+      await ctx.reply("⏳ Token tekshirilmoqda...");
       try {
-        const validateRes = await fetch(`https://api.telegram.org/bot${tokenInput}/getMe`);
-        const data = (await validateRes.json()) as { ok: boolean; result?: { username?: string } };
+        const validateRes = await fetch(`https://api.telegram.org/bot${text}/getMe`);
+        const data = (await validateRes.json()) as { ok: boolean; result?: { username?: string; first_name?: string } };
         if (!data.ok) {
-          await ctx.reply("❌ Bot tokeni noto'g'ri. Qayta yuboring:");
+          await ctx.reply(
+            "❌ Bu token yaroqsiz. Iltimos @BotFather dan to'g'ri tokenni olib, qayta yuboring:",
+            { reply_markup: cancelKeyboard }
+          );
           return;
         }
-        ctx.session.botToken = tokenInput;
+        ctx.session.botToken = text;
         ctx.session.step = "awaiting_catalog";
-        await ctx.reply("Mahsulotlar katalogini va qoidalarini matn ko'rinishida yuboring:");
+        await ctx.reply(
+          `✅ Bot topildi: <b>${sanitize(data.result?.first_name ?? "")} (@${sanitize(data.result?.username ?? "")})</b>\n\n` +
+          `<b>3-qadam / 3:</b> Mahsulotlar katalogini quyidagi formatda yuboring:\n\n` +
+          `<code>Mahsulot nomi | Narxi | Tavsifi\n` +
+          `Mahsulot nomi | Narxi | Tavsifi</code>\n\n` +
+          `<b>Namuna:</b>\n` +
+          `<code>iPhone 15 Pro | 12 500 000 so'm | 256GB, Titanium, 1 yil kafolat\n` +
+          `AirPods Pro | 2 800 000 so'm | Shovqin o'chirish, USB-C, original</code>\n\n` +
+          `⚠️ Har bir mahsulot alohida qatorda bo'lsin. | belgisini ajratuvchi sifatida ishlating.`,
+          { parse_mode: "HTML", reply_markup: cancelKeyboard }
+        );
       } catch (err) {
         logger.error({ err }, "Token validation error");
-        await ctx.reply("❌ Bot tokeni noto'g'ri. Qayta yuboring:");
+        await ctx.reply("❌ Server xatosi. Tokenni qayta yuboring:", { reply_markup: cancelKeyboard });
       }
       return;
     }
 
+    // ── Step 3: Catalog ────────────────────────────────────────────────────
     if (step === "awaiting_catalog") {
-      const catalogText = text.trim();
+      const { isValid, formatted, preview } = parseCatalog(text);
+
+      if (!isValid) {
+        await ctx.reply(
+          `❌ <b>Format xatosi:</b>\n\n${sanitize(preview)}\n\n` +
+          `Iltimos quyidagi formatda qayta yuboring:\n` +
+          `<code>Mahsulot nomi | Narxi | Tavsifi</code>`,
+          { parse_mode: "HTML", reply_markup: cancelKeyboard }
+        );
+        return;
+      }
+
       const tgId = BigInt(ctx.from!.id);
       const savedToken = ctx.session.botToken;
       const savedName = ctx.session.storeName;
@@ -182,7 +285,7 @@ export function createPlatformBot(token: string) {
       try {
         const user = await db.query.usersTable.findFirst({ where: eq(usersTable.telegramId, tgId) });
         if (!user || !savedToken || !savedName) {
-          await ctx.reply("❌ Xatolik: ma'lumotlar topilmadi. Qaytadan boshlang.");
+          await ctx.reply("❌ Sessiya xatosi. Iltimos qaytadan boshlang.", { reply_markup: mainKeyboard });
           ctx.session.step = undefined;
           return;
         }
@@ -190,7 +293,7 @@ export function createPlatformBot(token: string) {
         const validateRes = await fetch(`https://api.telegram.org/bot${savedToken}/getMe`);
         const data = (await validateRes.json()) as { ok: boolean; result?: { username?: string } };
         if (!data.ok) {
-          await ctx.reply("❌ Bot tokeni endi yaroqsiz. Qaytadan boshlang.");
+          await ctx.reply("❌ Bot tokeni endi yaroqsiz. Qaytadan boshlang.", { reply_markup: mainKeyboard });
           ctx.session.step = undefined;
           return;
         }
@@ -203,7 +306,7 @@ export function createPlatformBot(token: string) {
           botToken: savedToken,
           botUsername,
           storeName: savedName,
-          contextData: catalogText,
+          contextData: formatted,
           isActive: true,
         });
 
@@ -214,14 +317,12 @@ export function createPlatformBot(token: string) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ url: webhookUrl, drop_pending_updates: true }),
           });
-          const webhookData = (await webhookRes.json()) as { ok: boolean; description?: string };
+          const webhookData = (await webhookRes.json()) as { ok: boolean };
           if (webhookData.ok) {
             logger.info({ storeName: savedName, webhookUrl }, "Store bot webhook registered");
           } else {
             logger.error({ storeName: savedName, webhookData }, "Store bot webhook registration failed");
           }
-        } else {
-          logger.warn({ storeName: savedName }, "SERVER_URL not set — store bot webhook not registered");
         }
 
         ctx.session.step = undefined;
@@ -229,18 +330,17 @@ export function createPlatformBot(token: string) {
         ctx.session.botToken = undefined;
 
         await ctx.reply(
-          `✅ Do'koningiz muvaffaqiyatli yaratildi!\n\n` +
-            `🏪 Do'kon nomi: ${sanitize(savedName)}\n` +
-            `🤖 Bot: @${sanitize(botUsername)}\n\n` +
-            `Mijozlaringiz shu bot orqali buyurtma bera oladi: https://t.me/${sanitize(botUsername)}`,
-          { reply_markup: mainKeyboard }
+          `🎉 <b>Do'kon muvaffaqiyatli yaratildi!</b>\n\n` +
+          `🏪 <b>${sanitize(savedName)}</b>\n` +
+          `🤖 @${sanitize(botUsername)}\n\n` +
+          `<b>Katalog (${formatted.split("\n").length} ta mahsulot):</b>\n${preview}\n\n` +
+          `🔗 Mijozlar uchun havola: https://t.me/${sanitize(botUsername)}`,
+          { parse_mode: "HTML", reply_markup: mainKeyboard }
         );
       } catch (err) {
         logger.error({ err }, "Error saving store");
         ctx.session.step = undefined;
-        await ctx.reply("❌ Do'kon saqlashda xatolik yuz berdi. Qayta urinib ko'ring.", {
-          reply_markup: mainKeyboard,
-        });
+        await ctx.reply("❌ Saqlashda xatolik yuz berdi. Qayta urinib ko'ring.", { reply_markup: mainKeyboard });
       }
     }
   });
