@@ -101,6 +101,7 @@ export function createPlatformBot(token: string) {
   bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
     await ctx.answerCallbackQuery();
+    try {
 
     // ── nav:new_store ───────────────────────────────────────────────────────
     if (data === "nav:new_store") {
@@ -302,17 +303,34 @@ export function createPlatformBot(token: string) {
 
     // ── store:{id}:del_confirm — execute delete ───────────────────────────────
     if (data.startsWith("store:") && data.endsWith(":del_confirm")) {
-      const storeId = data.split(":")[1];
+      // Extract storeId robustly — everything between "store:" and the last ":"
+      const storeId = data.slice("store:".length, data.lastIndexOf(":"));
       const store = await db.query.storesTable.findFirst({ where: eq(storesTable.id, storeId) });
-      if (store) {
-        // Unregister webhook then delete
-        await fetch(`https://api.telegram.org/bot${store.botToken}/deleteWebhook`, { method: "POST" });
-        await db.delete(storesTable).where(eq(storesTable.id, storeId));
-        logger.info({ storeId, storeName: store.storeName }, "Store deleted");
+      if (!store) {
+        await ctx.editMessageText("❌ Do'kon topilmadi yoki allaqachon o'chirilgan.", {
+          reply_markup: { inline_keyboard: [[{ text: "🔙 Do'konlar", callback_data: "nav:stores" }]] },
+        });
+        return;
       }
-      await ctx.editMessageText("✅ Do'kon o'chirildi.", {
-        reply_markup: { inline_keyboard: [[{ text: "🔙 Do'konlar", callback_data: "nav:stores" }]] },
-      });
+
+      // 1. Unregister Telegram webhook (best-effort)
+      await fetch(`https://api.telegram.org/bot${store.botToken}/deleteWebhook`, { method: "POST" }).catch(() => {});
+
+      // 2. Delete child orders first to satisfy FK constraint
+      await db.delete(ordersTable).where(eq(ordersTable.storeId, storeId));
+
+      // 3. Delete the store
+      await db.delete(storesTable).where(eq(storesTable.id, storeId));
+
+      logger.info({ storeId, storeName: store.storeName }, "Store deleted");
+
+      await ctx.editMessageText(
+        `✅ <b>${sanitize(store.storeName)}</b> do'koni muvaffaqiyatli o'chirildi.`,
+        {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: [[{ text: "🔙 Do'konlarim", callback_data: "nav:stores" }]] },
+        }
+      );
       return;
     }
 
@@ -381,6 +399,12 @@ export function createPlatformBot(token: string) {
       );
       logger.info({ orderId, newStatus }, "Order status updated");
       return;
+    }
+    } catch (err) {
+      logger.error({ err, data }, "Callback query handler error");
+      try {
+        await ctx.reply("❌ Xatolik yuz berdi. Qayta urinib ko'ring.");
+      } catch { /* ignore secondary error */ }
     }
   });
 
