@@ -2,7 +2,7 @@ import { Bot, session, Context } from "grammy";
 import type { SessionFlavor } from "grammy";
 import { db } from "@workspace/db";
 import { usersTable, storesTable, ordersTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { logger } from "../lib/logger";
 
 interface SessionData {
@@ -18,6 +18,12 @@ function sanitize(text: string): string {
   return text.replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#x27;" }[c] ?? c)
   );
+}
+
+/** Format a number as readable price: 14500000 → "14 500 000" */
+function formatPrice(value: number | string): string {
+  const n = Math.round(Number(value));
+  return isNaN(n) ? "0" : n.toLocaleString("uz-UZ").replace(/,/g, " ");
 }
 
 function getServerUrl(): string | null {
@@ -46,7 +52,57 @@ function parseCatalog(raw: string): { isValid: boolean; formatted: string; previ
   return { isValid: true, formatted, preview };
 }
 
-// Inline keyboard type alias
+// ─────────────────────────────────────────────────────────────────────────────
+// Statistics
+// ─────────────────────────────────────────────────────────────────────────────
+interface StoreStats {
+  orderCount: number;
+  revenue: number;
+  topProducts: string[];
+}
+
+type StatPeriod = "day" | "week" | "month";
+
+async function getStoreStats(storeId: string, period: StatPeriod): Promise<StoreStats> {
+  // Date filter expression for each period
+  const periodFilter =
+    period === "day"
+      ? sql`created_at::date = NOW()::date`
+      : period === "week"
+      ? sql`created_at >= NOW() - INTERVAL '7 days'`
+      : sql`date_trunc('month', created_at) = date_trunc('month', NOW())`;
+
+  // Main aggregation — uses orders_store_created_idx
+  const mainResult = await db.execute<{ order_count: string; revenue: string }>(sql`
+    SELECT
+      COUNT(*)::text              AS order_count,
+      COALESCE(SUM(total_price), 0)::text AS revenue
+    FROM orders
+    WHERE store_id = ${storeId}::uuid
+      AND ${periodFilter}
+  `);
+
+  // Top 3 most-ordered products (all-time for this store)
+  const topResult = await db.execute<{ product: string }>(sql`
+    SELECT order_items->>'items' AS product
+    FROM orders
+    WHERE store_id = ${storeId}::uuid
+    GROUP BY order_items->>'items'
+    ORDER BY COUNT(*) DESC
+    LIMIT 3
+  `);
+
+  const row = mainResult.rows[0] ?? { order_count: "0", revenue: "0" };
+  return {
+    orderCount: parseInt(row.order_count ?? "0", 10),
+    revenue: parseFloat(row.revenue ?? "0"),
+    topProducts: topResult.rows.map(r => r.product).filter(Boolean),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keyboards
+// ─────────────────────────────────────────────────────────────────────────────
 type IKBtn = { text: string; callback_data: string };
 
 const START_KEYBOARD = {
@@ -64,6 +120,23 @@ const CANCEL_KEYBOARD = {
   resize_keyboard: true,
 };
 
+/** Period selector — reused both on the stats landing and each stats result page. */
+function statsKeyboard(storeId: string, backLabel = "🔙 Orqaga", backCb = `store:${storeId}`): { inline_keyboard: IKBtn[][] } {
+  return {
+    inline_keyboard: [
+      [
+        { text: "📅 Kunlik",  callback_data: `stats:${storeId}:day`   },
+        { text: "🗓 Haftalik", callback_data: `stats:${storeId}:week`  },
+        { text: "📆 Oylik",   callback_data: `stats:${storeId}:month` },
+      ],
+      [{ text: backLabel, callback_data: backCb }],
+    ],
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bot factory
+// ─────────────────────────────────────────────────────────────────────────────
 export function createPlatformBot(token: string) {
   const bot = new Bot<MyContext>(token);
   bot.use(session({ initial: (): SessionData => ({}) }));
@@ -77,11 +150,9 @@ export function createPlatformBot(token: string) {
         .onConflictDoNothing();
       ctx.session.step = undefined;
 
-      // Remove any existing reply keyboard first, then show inline menu
       await ctx.reply("🤖 Woxsom AI", { reply_markup: { remove_keyboard: true } });
       await ctx.reply(
-        `👋 Xush kelibsiz, <b>${sanitize(ctx.from?.first_name ?? "")}</b>!\n\n` +
-        `Quyidagi bo'limlardan birini tanlang:`,
+        `👋 Xush kelibsiz, <b>${sanitize(ctx.from?.first_name ?? "")}</b>!\n\nBo'limni tanlang:`,
         { parse_mode: "HTML", reply_markup: START_KEYBOARD }
       );
     } catch (err) { logger.error({ err }, "Error in /start"); }
@@ -109,9 +180,7 @@ export function createPlatformBot(token: string) {
       ctx.session.storeName = undefined;
       ctx.session.botToken = undefined;
       await ctx.reply(
-        `🏪 <b>Yangi do'kon yaratish</b>\n\n` +
-        `<b>1-qadam / 3:</b> Do'koningiz nomini kiriting.\n` +
-        `<i>Masalan: iPhone Hay, Kameliya Boutique</i>`,
+        `🏪 <b>Yangi do'kon yaratish</b>\n\n<b>1-qadam / 3:</b> Do'koningiz nomini kiriting.\n<i>Masalan: iPhone Hay, Kameliya Boutique</i>`,
         { parse_mode: "HTML", reply_markup: CANCEL_KEYBOARD }
       );
       return;
@@ -126,9 +195,7 @@ export function createPlatformBot(token: string) {
       const stores = await db.query.storesTable.findMany({ where: eq(storesTable.ownerId, user.id) });
       if (!stores.length) {
         await ctx.editMessageText("Sizda hali do'kon yo'q.", {
-          reply_markup: {
-            inline_keyboard: [[{ text: "➕ Do'kon yaratish", callback_data: "nav:new_store" }]],
-          },
+          reply_markup: { inline_keyboard: [[{ text: "➕ Do'kon yaratish", callback_data: "nav:new_store" }]] },
         });
         return;
       }
@@ -214,6 +281,58 @@ export function createPlatformBot(token: string) {
       return;
     }
 
+    // ── stats:{storeId} — period selector ────────────────────────────────────
+    if (data.startsWith("stats:") && data.split(":").length === 2) {
+      const storeId = data.split(":")[1];
+      const store = await db.query.storesTable.findFirst({ where: eq(storesTable.id, storeId) });
+      if (!store) { await ctx.reply("Do'kon topilmadi."); return; }
+
+      await ctx.editMessageText(
+        `📊 <b>${sanitize(store.storeName)}</b> — Statistika\n\nDavrni tanlang:`,
+        { parse_mode: "HTML", reply_markup: statsKeyboard(storeId) }
+      );
+      return;
+    }
+
+    // ── stats:{storeId}:{period} — show aggregated data ──────────────────────
+    if (data.startsWith("stats:") && data.split(":").length === 3) {
+      const parts   = data.split(":");
+      const storeId = parts[1];
+      const period  = parts[2] as StatPeriod;
+
+      if (!["day", "week", "month"].includes(period)) return;
+
+      const store = await db.query.storesTable.findFirst({ where: eq(storesTable.id, storeId) });
+      if (!store) { await ctx.reply("Do'kon topilmadi."); return; }
+
+      const stats = await getStoreStats(storeId, period);
+
+      const periodLabel: Record<StatPeriod, string> = {
+        day:   "📅 Bugun",
+        week:  "🗓 Oxirgi 7 kun",
+        month: "📆 Bu oy",
+      };
+      const medals = ["🥇", "🥈", "🥉"];
+      const topList = stats.topProducts.length
+        ? stats.topProducts.map((p, i) => `${medals[i]} ${sanitize(p)}`).join("\n")
+        : "   — Ma'lumot yo'q";
+
+      await ctx.editMessageText(
+        `📊 <b>${sanitize(store.storeName)}</b>\n` +
+        `${periodLabel[period]}\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `🛍 Buyurtmalar soni: <b>${stats.orderCount}</b>\n` +
+        `💰 Jami tushum: <b>${formatPrice(stats.revenue)} so'm</b>\n` +
+        `━━━━━━━━━━━━━━\n` +
+        `🔥 Top 3 mahsulot:\n${topList}`,
+        {
+          parse_mode: "HTML",
+          reply_markup: statsKeyboard(storeId, "🔙 Do'konga", `store:${storeId}`),
+        }
+      );
+      return;
+    }
+
     // ── store:{id} — store detail menu ───────────────────────────────────────
     if (data.startsWith("store:") && data.split(":").length === 2) {
       const storeId = data.split(":")[1];
@@ -229,9 +348,12 @@ export function createPlatformBot(token: string) {
             inline_keyboard: [
               [
                 { text: "✏️ O'zgartirish", callback_data: `store:${storeId}:edit` },
-                { text: "🗑 O'chirish", callback_data: `store:${storeId}:delete` },
+                { text: "🗑 O'chirish",    callback_data: `store:${storeId}:delete` },
               ],
-              [{ text: "🛒 Mahsulotlar", callback_data: `store:${storeId}:products` }],
+              [
+                { text: "🛒 Mahsulotlar",  callback_data: `store:${storeId}:products` },
+                { text: "📊 Statistika",   callback_data: `stats:${storeId}` },
+              ],
               [{ text: "🔙 Do'konlar", callback_data: "nav:stores" }],
             ],
           },
@@ -256,9 +378,7 @@ export function createPlatformBot(token: string) {
         `🛒 <b>${sanitize(store.storeName)} — Mahsulotlar (${products.length} ta)</b>\n\n${products.join("\n\n")}`,
         {
           parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [[{ text: "🔙 Orqaga", callback_data: `store:${storeId}` }]],
-          },
+          reply_markup: { inline_keyboard: [[{ text: "🔙 Orqaga", callback_data: `store:${storeId}` }]] },
         }
       );
       return;
@@ -270,8 +390,7 @@ export function createPlatformBot(token: string) {
       ctx.session.step = "editing_catalog";
       ctx.session.editingStoreId = storeId;
       await ctx.reply(
-        `✏️ <b>Katalogni yangilash</b>\n\n` +
-        `Yangi katalogni quyidagi formatda yuboring:\n\n` +
+        `✏️ <b>Katalogni yangilash</b>\n\nYangi katalogni quyidagi formatda yuboring:\n\n` +
         `<code>Mahsulot nomi | Narxi | Tavsifi</code>\n\n` +
         `<b>Namuna:</b>\n<code>iPhone 15 Pro | 12 500 000 so'm | 256GB, kafolat 1 yil</code>`,
         { parse_mode: "HTML", reply_markup: CANCEL_KEYBOARD }
@@ -289,12 +408,10 @@ export function createPlatformBot(token: string) {
         {
           parse_mode: "HTML",
           reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "✅ Ha, o'chir", callback_data: `store:${storeId}:del_confirm` },
-                { text: "❌ Yo'q", callback_data: `store:${storeId}` },
-              ],
-            ],
+            inline_keyboard: [[
+              { text: "✅ Ha, o'chir", callback_data: `store:${storeId}:del_confirm` },
+              { text: "❌ Yo'q",       callback_data: `store:${storeId}` },
+            ]],
           },
         }
       );
@@ -303,7 +420,6 @@ export function createPlatformBot(token: string) {
 
     // ── store:{id}:del_confirm — execute delete ───────────────────────────────
     if (data.startsWith("store:") && data.endsWith(":del_confirm")) {
-      // Extract storeId robustly — everything between "store:" and the last ":"
       const storeId = data.slice("store:".length, data.lastIndexOf(":"));
       const store = await db.query.storesTable.findFirst({ where: eq(storesTable.id, storeId) });
       if (!store) {
@@ -313,17 +429,11 @@ export function createPlatformBot(token: string) {
         return;
       }
 
-      // 1. Unregister Telegram webhook (best-effort)
       await fetch(`https://api.telegram.org/bot${store.botToken}/deleteWebhook`, { method: "POST" }).catch(() => {});
-
-      // 2. Delete child orders first to satisfy FK constraint
       await db.delete(ordersTable).where(eq(ordersTable.storeId, storeId));
-
-      // 3. Delete the store
       await db.delete(storesTable).where(eq(storesTable.id, storeId));
 
       logger.info({ storeId, storeName: store.storeName }, "Store deleted");
-
       await ctx.editMessageText(
         `✅ <b>${sanitize(store.storeName)}</b> do'koni muvaffaqiyatli o'chirildi.`,
         {
@@ -341,18 +451,17 @@ export function createPlatformBot(token: string) {
       if (!order) { await ctx.reply("Buyurtma topilmadi."); return; }
 
       await ctx.editMessageText(
-        `⚙️ <b>${sanitize(order.customerName)}</b> buyurtmasi uchun yangi status tanlang:\n\n` +
-        `📍 Hozirgi: <b>${order.status}</b>`,
+        `⚙️ <b>${sanitize(order.customerName)}</b> buyurtmasi uchun yangi status:\n\n📍 Hozirgi: <b>${order.status}</b>`,
         {
           parse_mode: "HTML",
           reply_markup: {
             inline_keyboard: [
               [
-                { text: "✅ To'langan", callback_data: `order:${orderId}:set:PAID` },
+                { text: "✅ To'langan",    callback_data: `order:${orderId}:set:PAID` },
                 { text: "🚚 Yetkazilmoqda", callback_data: `order:${orderId}:set:SHIPPED` },
               ],
               [
-                { text: "📬 Yetkazildi", callback_data: `order:${orderId}:set:DELIVERED` },
+                { text: "📬 Yetkazildi",   callback_data: `order:${orderId}:set:DELIVERED` },
                 { text: "❌ Bekor qilish", callback_data: `order:${orderId}:set:CANCELLED` },
               ],
               [{ text: "🔙 Buyurtmalarga", callback_data: "nav:orders" }],
@@ -365,9 +474,8 @@ export function createPlatformBot(token: string) {
 
     // ── order:{id}:set:{STATUS} — update DB ───────────────────────────────
     if (data.startsWith("order:") && data.includes(":set:")) {
-      const parts = data.split(":");
-      // format: order:{id}:set:{STATUS}  — id is uuid with 4 dashes → parts[1] is uuid
-      const orderId = parts[1];
+      const parts     = data.split(":");
+      const orderId   = parts[1];
       const newStatus = parts[3] as string;
 
       const validStatuses = ["PAID", "SHIPPED", "DELIVERED", "CANCELLED"];
@@ -386,25 +494,19 @@ export function createPlatformBot(token: string) {
       };
 
       await ctx.editMessageText(
-        `✅ Status yangilandi!\n\n` +
-        `👤 <b>${sanitize(order.customerName)}</b>\n` +
-        `📦 Yangi status: <b>${statusLabel[newStatus] ?? newStatus}</b>\n` +
-        `💰 ${order.totalPrice} so'm`,
+        `✅ Status yangilandi!\n\n👤 <b>${sanitize(order.customerName)}</b>\n📦 Yangi status: <b>${statusLabel[newStatus] ?? newStatus}</b>\n💰 ${order.totalPrice} so'm`,
         {
           parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [[{ text: "🔙 Buyurtmalarga", callback_data: "nav:orders" }]],
-          },
+          reply_markup: { inline_keyboard: [[{ text: "🔙 Buyurtmalarga", callback_data: "nav:orders" }]] },
         }
       );
       logger.info({ orderId, newStatus }, "Order status updated");
       return;
     }
+
     } catch (err) {
       logger.error({ err, data }, "Callback query handler error");
-      try {
-        await ctx.reply("❌ Xatolik yuz berdi. Qayta urinib ko'ring.");
-      } catch { /* ignore secondary error */ }
+      try { await ctx.reply("❌ Xatolik yuz berdi. Qayta urinib ko'ring."); } catch { /* ignore */ }
     }
   });
 
@@ -423,10 +525,8 @@ export function createPlatformBot(token: string) {
       ctx.session.storeName = text;
       ctx.session.step = "awaiting_token";
       await ctx.reply(
-        `✅ <b>${sanitize(text)}</b>\n\n` +
-        `<b>2-qadam / 3:</b> Telegram Bot Tokenini yuboring.\n` +
-        `💡 @BotFather → /newbot → tokenni nusxalab yuboring.\n` +
-        `<i>Misol: 123456789:AAFabc...</i>`,
+        `✅ <b>${sanitize(text)}</b>\n\n<b>2-qadam / 3:</b> Telegram Bot Tokenini yuboring.\n` +
+        `💡 @BotFather → /newbot → tokenni nusxalab yuboring.\n<i>Misol: 123456789:AAFabc...</i>`,
         { parse_mode: "HTML", reply_markup: CANCEL_KEYBOARD }
       );
       return;
@@ -472,7 +572,7 @@ export function createPlatformBot(token: string) {
       const tgId = BigInt(ctx.from!.id);
       const user = await db.query.usersTable.findFirst({ where: eq(usersTable.telegramId, tgId) });
       const savedToken = ctx.session.botToken;
-      const savedName = ctx.session.storeName;
+      const savedName  = ctx.session.storeName;
 
       if (!user || !savedToken || !savedName) {
         await ctx.reply("❌ Sessiya xatosi. Qaytadan boshlang.", { reply_markup: { remove_keyboard: true } });
@@ -489,7 +589,7 @@ export function createPlatformBot(token: string) {
       }
 
       const botUsername = d.result?.username ?? "unknown";
-      const serverUrl = getServerUrl();
+      const serverUrl   = getServerUrl();
 
       await db.insert(storesTable).values({
         ownerId: user.id, botToken: savedToken, botUsername,
