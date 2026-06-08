@@ -14,6 +14,7 @@ import {
 } from "../lib/cache";
 import { tgSend, tgSendPhoto, tgAnswer } from "../lib/tgApi";
 import type { InlineKeyboard } from "../lib/tgApi";
+import type { ChatMessage } from "../lib/cache";
 
 const router = Router();
 
@@ -173,7 +174,11 @@ function fastPath(
  */
 function isCollectingOrder(botToken: string, chatId: number): boolean {
   const history = getHistory(botToken, chatId);
-  const last = history.findLast((m) => m.role === "assistant");
+  // findLast is ES2023; use reverse-iteration for ES2022 target compatibility
+  let last: ChatMessage | undefined;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]!.role === "assistant") { last = history[i]; break; }
+  }
   if (!last) return false;
   const c = last.content.toLowerCase();
   return (
