@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { ordersTable, usersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { openai } from "@workspace/integrations-openai-ai-server";
+import Groq from "groq-sdk";
 import { logger } from "../lib/logger";
 import {
   getStoreByToken,
@@ -16,13 +16,14 @@ import { tgSend, tgSendPhoto, tgAnswer } from "../lib/tgApi";
 import type { InlineKeyboard } from "../lib/tgApi";
 import type { ChatMessage } from "../lib/cache";
 
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const router = Router();
 
 // ── Model config ──────────────────────────────────────────────────────────────
-const MODEL          = "Qwen/Qwen2.5-7B-Instruct";
+const MODEL          = "llama3-8b-8192";  // Groq: fastest Llama 3 tier
 const MAX_TOKENS     = 50;    // 50 tokens ≈ 15-20 words — more than enough
 const TEMPERATURE    = 0.1;   // near-zero = fastest, most deterministic decode
-const AI_TIMEOUT_MS  = 12_000;
+const AI_TIMEOUT_MS  = 8_000; // Groq is sub-second; 8 s is a generous ceiling
 const ORDER_MARKER   = "___CREATE_ORDER___";
 
 // Stop sequences: model stops the moment it outputs any of these strings.
@@ -342,7 +343,7 @@ async function handleUserMessage(
 
     let aiText: string;
     try {
-      const res = await openai.chat.completions.create(
+      const res = await groq.chat.completions.create(
         {
           model: MODEL,
           max_tokens: MAX_TOKENS,
