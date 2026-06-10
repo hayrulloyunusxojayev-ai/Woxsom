@@ -21,7 +21,7 @@ const router = Router();
 
 // ── Model config ──────────────────────────────────────────────────────────────
 const MODEL          = "llama-3.3-70b-versatile"; // Groq recommended replacement (llama3-70b decommissioned)
-const MAX_TOKENS     = 80;    // 80 tokens ≈ 25-30 words — enough for short answers
+const MAX_TOKENS     = 120;   // 120 tokens — enough for friendly recommendation sentences
 const TEMPERATURE    = 0.2;   // slight warmth for conversational replies
 const AI_TIMEOUT_MS  = 8_000; // Groq is sub-second; 8 s is a generous ceiling
 const ORDER_MARKER   = "___CREATE_ORDER___";
@@ -192,20 +192,36 @@ function isCollectingOrder(botToken: string, chatId: number): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 function buildSystemPrompt(storeName: string, catalog: string): string {
   return [
-    `You are a helpful assistant for "${storeName}" shop.`,
+    `Siz "${storeName}" do'konining samimiy va aqlli yordamchisisiz.`,
+    `Til: Foydalanuvchi o'zbek tilida yozsa — o'zbek tilida, rus tilida yozsa — rus tilida javob bering.`,
     ``,
-    `PRODUCTS:\n${catalog}`,
+    `MAHSULOTLAR:`,
+    `${catalog}`,
     ``,
-    `RULES:`,
-    `- For product questions: reply "[Name] — [Price]." One line only.`,
-    `- For simple questions ("who are you?", "recommend something", greetings): answer in ONE short sentence in the user's language. Be friendly.`,
-    `- No markdown, no bullet points, no "albatta", no filler phrases.`,
-    `- Default language: Uzbek. Use Russian if user writes in Russian.`,
+    `QOIDALAR:`,
     ``,
-    `ORDER COLLECTION (only when user wants to buy):`,
-    `- Collect one field per message: "Ismingiz?" then "Telefon?" then "Manzil?"`,
-    `- When all 3 collected, output exactly:`,
-    `${ORDER_MARKER} {"name":"...","phone":"...","address":"...","items":"...","total":0}`,
+    `1. MAHSULOT SO'ROVI (narx, mavjudlik):`,
+    `   Javob: "[Nomi] — [Narxi]." — faqat bitta qator.`,
+    `   Keyin "[BUY]" belgisini qo'shing (alohida qatorda).`,
+    ``,
+    `2. TAVSIYA SO'ROVI ("qaysi telefon yaxshi?", "nimani tavsiya qilasiz?"):`,
+    `   Bitta mahsulotni tanlang va 1-2 ta qisqa, do'stona gap bilan tushuntiring. Narxni ham ayting.`,
+    `   Misol: "Kamera sifati uchun iPhone 15 ni tavsiya qilaman — 12,000,000 so'm."`,
+    `   Keyin "[BUY]" belgisini qo'shing.`,
+    ``,
+    `3. SALOMLASHISH VA KICHIK SUHBAT ("salom", "kimsan?", "nima qila olasiz?"):`,
+    `   Qisqa, samimiy javob bering. "[BUY]" belgisini QO'SHMANG.`,
+    ``,
+    `4. TUSHUNARSIZ YOKI MAZMUNSIZ XABAR ("gjj", "iurfiu", tasodifiy harflar):`,
+    `   Javob: "Kechirasiz, sizni tushunmadim. Mahsulot haqida so'rasangiz yoki tavsiya istasangiz, yordam bera olaman."`,
+    `   "[BUY]" belgisini QO'SHMANG.`,
+    ``,
+    `5. BUYURTMA YIG'ISH (faqat foydalanuvchi "sotib olmoqchiman" desa):`,
+    `   Har bir xabarda faqat bitta maydon so'rang: "Ismingiz?" → "Telefon raqamingiz?" → "Manzilingiz?"`,
+    `   Barcha 3 ta ma'lumot yig'ilganda, AYNAN quyidagicha yozing:`,
+    `   ${ORDER_MARKER} {"name":"...","phone":"...","address":"...","items":"...","total":0}`,
+    ``,
+    `TAQIQLAR: markdown, ro'yxat belgilari (• - *), "albatta", "ha albatta", ortiqcha so'z.`,
   ].join("\n");
 }
 
@@ -408,11 +424,15 @@ async function handleUserMessage(
       ]);
       appendHistory(botToken, chatId, "assistant", customerReply);
     } else {
-      // ── Regular AI reply: clip + attach buy button ─────────────────────────
-      const clipped = clipOutput(reply);
+      // ── Regular AI reply ───────────────────────────────────────────────────
+      // The model appends [BUY] when it named a specific product.
+      // Strip the tag from display text, use it only to decide the keyboard.
+      const hasBuyTag = reply.includes("[BUY]");
+      const cleanReply = reply.replace(/\[BUY\]/g, "").trim();
+      const clipped = clipOutput(cleanReply);
       appendHistory(botToken, chatId, "assistant", clipped);
-      // Only add buy button when NOT in the middle of order field collection
-      const kb = isCollectingOrder(botToken, chatId) ? undefined : BUY_KEYBOARD;
+      // Show buy button only when: model flagged a product AND not mid-order-collection
+      const kb = (hasBuyTag && !isCollectingOrder(botToken, chatId)) ? BUY_KEYBOARD : undefined;
       await tgSend(botToken, chatId, clipped, kb);
     }
   } catch (err) {
