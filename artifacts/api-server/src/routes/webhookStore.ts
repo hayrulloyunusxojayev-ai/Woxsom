@@ -19,6 +19,22 @@ import type { ChatMessage } from "../lib/cache";
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const router = Router();
 
+// ── Pending order confirmation cache ─────────────────────────────────────────
+// Keyed by `${botToken}:${chatId}`. Cleared on confirm or on new /start.
+interface PendingOrder {
+  storeId: string;
+  storeOwnerId: string;
+  storeName: string;
+  fromId: number;
+  name: string;
+  phone: string;
+  address: string;
+  items: string;
+  total: number;
+}
+const pendingOrders = new Map<string, PendingOrder>();
+function pendingKey(botToken: string, chatId: number) { return `${botToken}:${chatId}`; }
+
 // ── Model config ──────────────────────────────────────────────────────────────
 const MODEL          = "llama-3.3-70b-versatile"; // Groq recommended replacement (llama3-70b decommissioned)
 const MAX_TOKENS     = 120;   // 120 tokens — enough for friendly recommendation sentences
@@ -192,36 +208,44 @@ function isCollectingOrder(botToken: string, chatId: number): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 function buildSystemPrompt(storeName: string, catalog: string): string {
   return [
-    `Siz "${storeName}" do'konining samimiy va aqlli yordamchisisiz.`,
-    `Til: Foydalanuvchi o'zbek tilida yozsa — o'zbek tilida, rus tilida yozsa — rus tilida javob bering.`,
+    `Siz "${storeName}" do'konining professional savdo maslahatchiisiz.`,
+    `Sizning vazifangiz — mijozga eng mos mahsulotni topishda yordam berish va u bilan iliq, samimiy muloqot qilish.`,
+    `Til: o'zbek tilida javob bering. Foydalanuvchi rus tilida yozsa — rus tilida javob bering.`,
     ``,
-    `MAHSULOTLAR:`,
+    `MAVJUD MAHSULOTLAR:`,
     `${catalog}`,
     ``,
-    `QOIDALAR:`,
+    `═══ XATTI-HARAKAT QOIDALARI ═══`,
     ``,
-    `1. MAHSULOT SO'ROVI (narx, mavjudlik):`,
-    `   Javob: "[Nomi] — [Narxi]." — faqat bitta qator.`,
-    `   Keyin "[BUY]" belgisini qo'shing (alohida qatorda).`,
+    `1. MAHSULOT HAQIDA SAVOL (narx, bor-yo'qligi):`,
+    `   — Mahsulot nomini va narxini ayting: "[Nomi] — [Narxi]."`,
+    `   — 1 ta qisqa ijobiy xususiyatini qo'shing.`,
+    `   — Javob oxiriga "[BUY]" qo'shing (bu faqat texnik belgi, foydalanuvchiga ko'rinmaydi).`,
+    `   Misol: "iPhone 15 — 12,000,000 so'm. Kuchli kamera va uzoq batareya bilan ajoyib tanlov! [BUY]"`,
     ``,
-    `2. TAVSIYA SO'ROVI ("qaysi telefon yaxshi?", "nimani tavsiya qilasiz?"):`,
-    `   Bitta mahsulotni tanlang va 1-2 ta qisqa, do'stona gap bilan tushuntiring. Narxni ham ayting.`,
-    `   Misol: "Kamera sifati uchun iPhone 15 ni tavsiya qilaman — 12,000,000 so'm."`,
-    `   Keyin "[BUY]" belgisini qo'shing.`,
+    `2. TAVSIYA SO'ROVI ("qaysi yaxshi?", "nimani olsam?", "tavsiya qiling"):`,
+    `   — Eng mos 1 ta mahsulotni tanlang.`,
+    `   — NIMA UCHUN yaxshiligini tushuntiring: kamera, batareya, ishlash tezligi, narx-sifat nisbati.`,
+    `   — Iliq va ishontiruvchi ohangda gapiring.`,
+    `   — Javob oxiriga "[BUY]" qo'shing.`,
+    `   Misol: "Samsung S24 ni tavsiya qilaman — 10,500,000 so'm. Suratga olish sifati va bir kunlik batareya resursi bilan bu narxda tengsiz tanlov! [BUY]"`,
     ``,
-    `3. SALOMLASHISH VA KICHIK SUHBAT ("salom", "kimsan?", "nima qila olasiz?"):`,
-    `   Qisqa, samimiy javob bering. "[BUY]" belgisini QO'SHMANG.`,
+    `3. SALOMLASHISH VA UMUMIY SUHBAT:`,
+    `   — Iliq va samimiy javob bering. "Sizga yordam berishdan xursandman!" kabi iboralar ishlating.`,
+    `   — "[BUY]" QO'SHMANG.`,
+    `   Misol: "Salom! Sizga yordam berishdan xursandman — qanday mahsulot qidiryapsiz?"`,
     ``,
-    `4. TUSHUNARSIZ YOKI MAZMUNSIZ XABAR ("gjj", "iurfiu", tasodifiy harflar):`,
-    `   Javob: "Kechirasiz, sizni tushunmadim. Mahsulot haqida so'rasangiz yoki tavsiya istasangiz, yordam bera olaman."`,
-    `   "[BUY]" belgisini QO'SHMANG.`,
+    `4. TUSHUNARSIZ YOKI TASODIFIY XABAR:`,
+    `   — Javob: "Kechirasiz, men sizni tushunmadim, iltimos, yana bir bor yozib yuboring."`,
+    `   — "[BUY]" QO'SHMANG. Buyurtma jarayonini boshlamang.`,
     ``,
-    `5. BUYURTMA YIG'ISH (faqat foydalanuvchi "sotib olmoqchiman" desa):`,
-    `   Har bir xabarda faqat bitta maydon so'rang: "Ismingiz?" → "Telefon raqamingiz?" → "Manzilingiz?"`,
-    `   Barcha 3 ta ma'lumot yig'ilganda, AYNAN quyidagicha yozing:`,
+    `5. BUYURTMA YIG'ISH — FAQAT "sotib olmoqchiman", "buyurtma bermoqchiman" desa:`,
+    `   — Har xabarda BITTA maydon so'rang: avval "Ismingiz?", keyin "Telefon raqamingiz?", keyin "Manzilingiz?"`,
+    `   — Boshqa hech narsa so'ramang. Ijobiy munosabat bildiring: "Ajoyib tanlov!", "Zo'r!"`,
+    `   — Barcha 3 ta ma'lumot to'liq yig'ilganda, AYNAN quyidagicha yozing (boshqa hech narsa yo'q):`,
     `   ${ORDER_MARKER} {"name":"...","phone":"...","address":"...","items":"...","total":0}`,
     ``,
-    `TAQIQLAR: markdown, ro'yxat belgilari (• - *), "albatta", "ha albatta", ortiqcha so'z.`,
+    `TAQIQLAR: markdown (**bold**, _italic_), ro'yxat belgilari (• - *), "albatta", "ha albatta", uzun iboralar.`,
   ].join("\n");
 }
 
@@ -389,40 +413,27 @@ async function handleUserMessage(
     const { reply, order } = extractOrder(aiText);
 
     if (order) {
-      // ── Order committed ────────────────────────────────────────────────────
-      await db.insert(ordersTable).values({
-        storeId,
-        customerTgId: BigInt(fromId),
-        customerName: order.name,
-        customerPhone: order.phone,
-        customerAddress: order.address,
-        orderItems: { items: order.items },
-        totalPrice: String(order.total ?? 0),
-        status: "PENDING",
+      // ── Park order and ask for confirmation ────────────────────────────────
+      pendingOrders.set(pendingKey(botToken, chatId), {
+        storeId, storeOwnerId, storeName, fromId,
+        name: order.name, phone: order.phone,
+        address: order.address, items: order.items,
+        total: order.total ?? 0,
       });
-      logger.info({ storeId, customer: order.name }, "Order committed");
       clearHistory(botToken, chatId);
 
-      // Notify owner — fire-and-forget
-      db.query.usersTable
-        .findFirst({ where: eq(usersTable.id, storeOwnerId) })
-        .then((owner) => {
-          const pt = process.env.PLATFORM_BOT_TOKEN;
-          if (owner && pt) {
-            tgSend(
-              pt, Number(owner.telegramId),
-              `🔔 <b>YANGI BUYURTMA!</b>\n\n🏪 ${storeName}\n👤 ${order.name}\n📞 ${order.phone}\n📍 ${order.address}\n🛒 ${order.items}\n💰 ${order.total} so'm`,
-            ).catch((e) => logger.error({ e }, "Owner notify failed"));
-          }
-        })
-        .catch((e) => logger.error({ e }, "Owner lookup failed"));
-
-      const customerReply = reply || "✅ Buyurtma qabul qilindi!";
-      await tgSend(botToken, chatId, customerReply, [
-        [{ text: "📦 Buyurtmalarim", callback_data: "menu:orders" }],
-        [{ text: "🏠 Bosh menyu", callback_data: "menu:start" }],
+      const summary =
+        `📋 <b>Buyurtmangizni tekshiring:</b>\n\n` +
+        `👤 Ism: ${order.name}\n` +
+        `📞 Telefon: ${order.phone}\n` +
+        `📍 Manzil: ${order.address}\n` +
+        `🛒 Mahsulot: ${order.items}\n\n` +
+        `Tasdiqlaysizmi?`;
+      await tgSend(botToken, chatId, summary, [
+        [{ text: "✅ Buyurtmani tasdiqlash", callback_data: "confirm:order" }],
+        [{ text: "❌ Bekor qilish", callback_data: "menu:start" }],
       ]);
-      appendHistory(botToken, chatId, "assistant", customerReply);
+      appendHistory(botToken, chatId, "assistant", summary);
     } else {
       // ── Regular AI reply ───────────────────────────────────────────────────
       // The model appends [BUY] when it named a specific product.
@@ -477,6 +488,7 @@ router.post("/webhook/store/:bot_token", async (req, res) => {
       await tgAnswer(bot_token, cbId);
 
       if (data === "menu:start") {
+        pendingOrders.delete(pendingKey(bot_token, chatId));
         await handleStart(bot_token, chatId, String(cbFrom?.first_name ?? ""), store.storeName);
       } else if (data === "menu:catalog") {
         await handleCatalog(bot_token, chatId, products, store.storeName);
@@ -484,9 +496,53 @@ router.post("/webhook/store/:bot_token", async (req, res) => {
         await handleMyOrders(bot_token, chatId, fromId ?? chatId);
       } else if (data === "menu:buy") {
         // Start order collection without touching the LLM
-        const q = "Ismingiz?";
+        const q = "Ajoyib tanlov! Ismingiz?";
         appendHistory(bot_token, chatId, "assistant", q);
         await tgSend(bot_token, chatId, q);
+      } else if (data === "confirm:order") {
+        // ── Commit confirmed order ─────────────────────────────────────────
+        const pk = pendingKey(bot_token, chatId);
+        const pending = pendingOrders.get(pk);
+        if (!pending) {
+          await tgSend(bot_token, chatId, "Buyurtma topilmadi. Iltimos, qaytadan urinib ko'ring.", [
+            [{ text: "🏠 Bosh menyu", callback_data: "menu:start" }],
+          ]);
+        } else {
+          pendingOrders.delete(pk);
+          await db.insert(ordersTable).values({
+            storeId: pending.storeId,
+            customerTgId: BigInt(pending.fromId),
+            customerName: pending.name,
+            customerPhone: pending.phone,
+            customerAddress: pending.address,
+            orderItems: { items: pending.items },
+            totalPrice: String(pending.total),
+            status: "PENDING",
+          });
+          logger.info({ storeId: pending.storeId, customer: pending.name }, "Order confirmed and committed");
+
+          // Notify store owner — fire-and-forget
+          db.query.usersTable
+            .findFirst({ where: eq(usersTable.id, pending.storeOwnerId) })
+            .then((owner) => {
+              const pt = process.env.PLATFORM_BOT_TOKEN;
+              if (owner && pt) {
+                tgSend(
+                  pt, Number(owner.telegramId),
+                  `🔔 <b>YANGI BUYURTMA!</b>\n\n🏪 ${pending.storeName}\n👤 ${pending.name}\n📞 ${pending.phone}\n📍 ${pending.address}\n🛒 ${pending.items}\n💰 ${pending.total} so'm`,
+                ).catch((e) => logger.error({ e }, "Owner notify failed"));
+              }
+            })
+            .catch((e) => logger.error({ e }, "Owner lookup failed"));
+
+          await tgSend(bot_token, chatId,
+            `✅ <b>Buyurtmangiz qabul qilindi!</b>\n\nTez orada siz bilan bog'lanamiz. Xarid uchun rahmat! 🙏`,
+            [
+              [{ text: "📦 Buyurtmalarim", callback_data: "menu:orders" }],
+              [{ text: "🏠 Bosh menyu", callback_data: "menu:start" }],
+            ],
+          );
+        }
       } else if (data.startsWith("pd:")) {
         // Product detail — no LLM, just catalog lookup by index
         const idx = parseInt(data.slice(3), 10);
