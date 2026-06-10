@@ -20,15 +20,14 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const router = Router();
 
 // ── Model config ──────────────────────────────────────────────────────────────
-const MODEL          = "llama3-8b-8192";  // Groq: fastest Llama 3 tier
-const MAX_TOKENS     = 50;    // 50 tokens ≈ 15-20 words — more than enough
-const TEMPERATURE    = 0.1;   // near-zero = fastest, most deterministic decode
+const MODEL          = "llama3-70b-8192"; // Groq: smarter tier, still ~sub-second
+const MAX_TOKENS     = 80;    // 80 tokens ≈ 25-30 words — enough for short answers
+const TEMPERATURE    = 0.2;   // slight warmth for conversational replies
 const AI_TIMEOUT_MS  = 8_000; // Groq is sub-second; 8 s is a generous ceiling
 const ORDER_MARKER   = "___CREATE_ORDER___";
 
-// Stop sequences: model stops the moment it outputs any of these strings.
-// Prevents the model from ever writing a second sentence, markdown, or filler.
-const STOP_SEQUENCES = ["\n\n", "\n•", "\n-", "Buyurtma bermoqchimisiz", "Вы хотите"];
+// Stop sequences — Groq hard-limits to 4 max. Keep the most useful ones.
+const STOP_SEQUENCES = ["\n\n", "\n•", "\n-", "Buyurtma bermoqchimisiz"];
 
 // ── Navigation ────────────────────────────────────────────────────────────────
 const MAIN_KEYBOARD: InlineKeyboard = [
@@ -193,15 +192,19 @@ function isCollectingOrder(botToken: string, chatId: number): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 function buildSystemPrompt(storeName: string, catalog: string): string {
   return [
-    `Product database terminal for "${storeName}". No sales language. No greetings.`,
+    `You are a helpful assistant for "${storeName}" shop.`,
+    ``,
     `PRODUCTS:\n${catalog}`,
-    `OUTPUT: "[Name] — [Price]." Stop. Nothing else.`,
-    `Details request only: add 1 spec sentence, then stop.`,
-    `FORBIDDEN: "albatta", "afsuski", questions, markdown, bullet points.`,
-    `LANGUAGE: Uzbek default. Russian if user writes Russian.`,
-    `ORDER COLLECTION mode (only when collecting): one field per reply.`,
-    `Ask exactly: "Ismingiz?" then "Telefon?" then "Manzil?"`,
-    `When all 3 collected, end with:`,
+    ``,
+    `RULES:`,
+    `- For product questions: reply "[Name] — [Price]." One line only.`,
+    `- For simple questions ("who are you?", "recommend something", greetings): answer in ONE short sentence in the user's language. Be friendly.`,
+    `- No markdown, no bullet points, no "albatta", no filler phrases.`,
+    `- Default language: Uzbek. Use Russian if user writes in Russian.`,
+    ``,
+    `ORDER COLLECTION (only when user wants to buy):`,
+    `- Collect one field per message: "Ismingiz?" then "Telefon?" then "Manzil?"`,
+    `- When all 3 collected, output exactly:`,
     `${ORDER_MARKER} {"name":"...","phone":"...","address":"...","items":"...","total":0}`,
   ].join("\n");
 }
@@ -357,6 +360,7 @@ async function handleUserMessage(
         { signal: controller.signal },
       );
       aiText = (res.choices[0]?.message?.content ?? "").trim();
+      console.log("AI Response:", aiText || "(empty)");
     } finally {
       clearTimeout(timer);
     }
@@ -412,7 +416,12 @@ async function handleUserMessage(
       await tgSend(botToken, chatId, clipped, kb);
     }
   } catch (err) {
-    logger.warn({ err: (err as Error).name === "AbortError" ? "timeout" : err }, "AI failed");
+    const e = err as Error & { status?: number; error?: unknown };
+    const detail = e.name === "AbortError"
+      ? "timeout"
+      : { name: e.name, message: e.message, status: e.status, body: e.error };
+    logger.warn({ err: detail }, "AI failed");
+    console.error("AI Error:", e.name, e.message, e.status ?? "");
     await tgSend(botToken, chatId, "Qayta urinib ko'ring.").catch(() => {});
   } finally {
     unlockChat(botToken, chatId);
