@@ -20,7 +20,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const router = Router();
 
 // ── Model config ──────────────────────────────────────────────────────────────
-const MODEL          = "llama3-70b-8192"; // Groq: smarter tier, still ~sub-second
+const MODEL          = "llama-3.3-70b-versatile"; // Groq recommended replacement (llama3-70b decommissioned)
 const MAX_TOKENS     = 80;    // 80 tokens ≈ 25-30 words — enough for short answers
 const TEMPERATURE    = 0.2;   // slight warmth for conversational replies
 const AI_TIMEOUT_MS  = 8_000; // Groq is sub-second; 8 s is a generous ceiling
